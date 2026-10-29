@@ -1,0 +1,12 @@
+{
+  "name": "Arepa Express — Pedidos",
+  "short_name": "Pedidos",
+  "description": "Tienda y panel de pedidos",
+  "start_url": "/pedidos",
+  "display": "standalone",
+  "background_color": "#fffaf4",
+  "theme_color": "#e4572e",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

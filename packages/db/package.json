@@ -1,0 +1,27 @@
+{
+  "name": "@pedidos/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "db:push": "drizzle-kit push",
+    "seed": "tsx src/seed.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.39.3",
+    "postgres": "3.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.10",
+    "drizzle-kit": "0.30.5",
+    "tsx": "4.19.3",
+    "typescript": "5.7.3",
+    "vitest": "2.1.9"
+  }
+}
