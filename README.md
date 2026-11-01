@@ -24,9 +24,9 @@ Abre:
 - Cocina: http://localhost:3000/cocina
 - API: http://localhost:4000/health
 
-La API usa un repositorio en memoria para que el recorrido completo funcione sin
-infraestructura. Reiniciar la API restablece pedidos y stock. El panel inicia sesión en
-`/ingresar`; la API key demo solo existe si se configura explícitamente `DEMO_MODE=true`.
+Con `DATABASE_URL`, la API usa PostgreSQL/Drizzle y reserva inventario dentro de la misma
+transacción que crea el pedido. Sin esa variable usa memoria para demo y pruebas; reiniciar
+restablece pedidos y stock. El panel inicia sesión en `/ingresar`.
 
 ## PostgreSQL y seed
 
@@ -36,6 +36,8 @@ copy .env.example .env
 pnpm db:push
 pnpm db:seed
 ```
+
+La migración RLS aditiva y sus instrucciones están en `docs/RLS.md`.
 
 El seed crea **Arepa Express** (`arepa-express`), categorías, productos, salsas y una
 zona de entrega. El esquema Drizzle usa `tenant_id`, importes enteros en centavos,
@@ -53,6 +55,7 @@ docker compose up --build
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm test:e2e
 ```
 
 `packages/domain-pricing` contiene `quote()` puro y determinista. Las pruebas cubren
