@@ -3,6 +3,7 @@ import { z } from "zod";
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   API_PORT: z.coerce.number().int().min(1).max(65_535).default(4000),
+  DATABASE_URL: z.string().url().optional(),
   WEB_ORIGIN: z.string().default("http://localhost:3000"),
   JWT_SECRET: z.string().min(32).default("desarrollo-solamente-cambiar-esta-clave"),
   DEMO_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
