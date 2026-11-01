@@ -7,10 +7,12 @@
     "build": "turbo build",
     "typecheck": "turbo typecheck",
     "test": "turbo test",
+    "test:e2e": "playwright test",
     "db:push": "pnpm --filter @pedidos/db db:push",
     "db:seed": "pnpm --filter @pedidos/db seed"
   },
   "devDependencies": {
+    "@playwright/test": "1.56.1",
     "turbo": "2.5.8",
     "typescript": "5.7.3"
   }

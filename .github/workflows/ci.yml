@@ -34,5 +34,7 @@ jobs:
       - run: pnpm build
         env:
           JWT_SECRET: ci-secret-with-at-least-thirty-two-characters
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
       - run: pnpm audit --prod
         continue-on-error: true
