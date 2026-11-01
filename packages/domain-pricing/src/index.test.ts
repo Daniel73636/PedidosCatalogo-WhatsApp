@@ -98,6 +98,32 @@ describe("quote", () => {
     expect(result.discountCents).toBe(result.subtotalCents);
     expect(result.totalCents).toBe(0);
   });
+
+  it("mantiene totales coherentes para múltiples cantidades, propinas y descuentos", () => {
+    for (let quantity = 1; quantity <= 5; quantity++) {
+      for (const tipCents of [0, 1, 999, 10_000]) {
+        const result = quote(
+          { fulfillment: "pickup", tipCents, items: [{ productId: "reina", optionIds: ["ajo"], quantity }] },
+          catalog, store, undefined,
+          { code: "P", kind: "percent", value: quantity * 997, maxDiscountCents: 1500 },
+        );
+        expect(result.discountCents).toBeGreaterThanOrEqual(0);
+        expect(result.discountCents).toBeLessThanOrEqual(result.subtotalCents);
+        expect(result.totalCents).toBe(result.subtotalCents - result.discountCents + result.tipCents);
+        expect(result.lines.reduce((sum, line) => sum + line.subtotalCents, 0)).toBe(result.subtotalCents);
+      }
+    }
+  });
+
+  it("rechaza toda cantidad que exceda el stock y acepta el límite exacto", () => {
+    for (let quantity = 1; quantity <= 8; quantity++) {
+      const result = quote(
+        { fulfillment: "pickup", items: [{ productId: "reina", optionIds: ["ajo"], quantity }] },
+        catalog, store,
+      );
+      expect(result.errors.some((error) => error.startsWith("OUT_OF_STOCK"))).toBe(quantity > 5);
+    }
+  });
 });
 
 describe("transition", () => {
@@ -111,5 +137,11 @@ describe("transition", () => {
 
   it("rechaza transiciones inválidas", () => {
     expect(() => transition("new", "deliver")).toThrow("INVALID_TRANSITION");
+  });
+
+  it("rechaza cualquier evento desde estados terminales salvo reembolso permitido", () => {
+    const events = ["accept", "reject", "expire", "cancel", "start", "ready", "dispatch", "deliver", "refund"] as const;
+    for (const status of ["rejected", "expired", "refunded"] as const)
+      for (const event of events) expect(() => transition(status, event)).toThrow("INVALID_TRANSITION");
   });
 });
