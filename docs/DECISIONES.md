@@ -11,3 +11,15 @@
 ## 2026-11-01 — Pagos
 
 **Decisión:** `PaymentProvider` con `MockPaymentProvider` y stub Wompi (`PAYMENTS_PROVIDER`). Transferencia con comprobante sigue disponible.
+
+## 2026-11-01 — Frontera HTTP y secretos
+
+**Decisión:** validar configuración al arrancar, usar allowlist CORS, Helmet, límites específicos y códigos de error estables en español. Ningún secreto administrativo se compila en la web; `DEMO_MODE` es opt-in explícito.
+
+## 2026-11-01 — Privacidad
+
+**Decisión:** consentimiento explícito y versionado al crear pedidos. Exportación y anonimización se restringen al tenant autenticado. La verificación de identidad y retención formal son bloqueadores antes de producción.
+
+## 2026-11-01 — Riesgo transaccional
+
+**Decisión:** la reserva en memoria se prueba contra concurrencia dentro de un proceso, pero no se presenta como garantía productiva. PostgreSQL con transacción y bloqueo condicional es P0 pendiente.
