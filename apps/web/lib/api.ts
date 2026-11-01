@@ -1,5 +1,4 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-export const ADMIN_KEY = process.env.NEXT_PUBLIC_DEMO_ADMIN_KEY ?? "demo-admin-key";
 
 export interface Product {
   id: string;
@@ -31,11 +30,13 @@ export const money = (cents: number) =>
   new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(cents / 100);
 
 export async function api<T>(path: string, init?: RequestInit, admin = false): Promise<T> {
+  const accessToken = admin && typeof window !== "undefined" ? localStorage.getItem("pedidos-access-token") : null;
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(admin ? { "X-API-Key": ADMIN_KEY } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...init?.headers,
     },
   });

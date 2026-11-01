@@ -1,16 +1,29 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import { createOrderSchema, productInputSchema, quoteRequestSchema, transitionRequestSchema } from "@pedidos/contracts";
 import { quote, transition, type Cart, type OrderStatus } from "@pedidos/domain-pricing";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
-import { catalog, coupons, idempotency, orders, store, whatsappLogs, zone, type DemoOrder } from "./data.js";
+import { login, principalFromApiKey, refresh, seedDemoUser, verifyToken, type Principal } from "./auth.js";
+import { catalog, coupons, idempotency, orders, store, tenantId, whatsappLogs, zone, type DemoOrder } from "./data.js";
+import { loadEnv } from "./env.js";
+import { MockPaymentProvider, WompiPaymentProvider } from "./payments.js";
 
-const app = Fastify({ logger: true, bodyLimit: 2_000_000 });
-await app.register(cors, { origin: process.env.WEB_ORIGIN?.split(",") ?? true });
+const env = loadEnv();
+const app = Fastify({ logger: env.NODE_ENV !== "test", bodyLimit: 2_000_000, trustProxy: true });
+const allowedOrigins = new Set(env.WEB_ORIGIN.split(",").map((origin) => origin.trim()));
+await app.register(cors, {
+  credentials: true,
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)),
+});
+await app.register(cookie);
 await app.register(helmet, { contentSecurityPolicy: false });
 await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
+await seedDemoUser();
+const principals = new WeakMap<FastifyRequest, Principal>();
+const paymentProvider = env.PAYMENTS_PROVIDER === "wompi" ? new WompiPaymentProvider() : new MockPaymentProvider();
 
 const subscribers = new Set<FastifyReply>();
 const broadcast = (event: string, data: unknown) => {
@@ -34,10 +47,30 @@ const parse = <T>(result: { success: boolean; data?: T; error?: { flatten(): unk
   return result.data;
 };
 const privateGuard = async (request: FastifyRequest, reply: FastifyReply) => {
-  const configured = process.env.ADMIN_API_KEY ?? "demo-admin-key";
-  const queryKey = (request.query as { key?: string } | undefined)?.key;
-  if (request.headers["x-api-key"] !== configured && queryKey !== configured)
-    return problem(reply, 401, "UNAUTHORIZED", "Envía una clave válida en X-API-Key.");
+  try {
+    const authorization = request.headers.authorization;
+    const rawApiKey = request.headers["x-api-key"];
+    const principal = authorization?.startsWith("Bearer ")
+      ? await verifyToken(authorization.slice(7), env, "access")
+      : typeof rawApiKey === "string" ? principalFromApiKey(rawApiKey, env) : undefined;
+    if (!principal) return problem(reply, 401, "NO_AUTORIZADO", "Inicia sesión o envía una API key válida.");
+    if (principal.tenantId !== tenantId) return problem(reply, 403, "TENANT_NO_AUTORIZADO", "No tienes acceso a este comercio.");
+    const route = request.routeOptions.url ?? request.url;
+    const write = !["GET", "HEAD", "OPTIONS"].includes(request.method);
+    const resource = route.includes("/products") || route.includes("/categories") ? "catalog"
+      : route.includes("/reports") ? "reports" : route.includes("/customers") ? "customers" : "orders";
+    const requiredScope = `${resource}:${write ? "write" : "read"}`;
+    if (principal.subject.startsWith("api-key:") && !principal.scopes.includes("*") && !principal.scopes.includes(requiredScope))
+      return problem(reply, 403, "ALCANCE_INSUFICIENTE", `La API key requiere ${requiredScope}.`);
+    const roleAllowed = principal.role === "owner"
+      || (principal.role === "cashier" && resource !== "reports")
+      || (principal.role === "kitchen" && resource === "orders")
+      || (principal.role === "courier" && resource === "orders");
+    if (!roleAllowed) return problem(reply, 403, "ROL_INSUFICIENTE", "Tu rol no permite esta operación.");
+    principals.set(request, principal);
+  } catch {
+    return problem(reply, 401, "TOKEN_INVALIDO", "La sesión venció o no es válida.");
+  }
 };
 const couponFor = (code?: string) => coupons.find((coupon) => coupon.code === code?.toUpperCase());
 const maskPhone = (phone: string) => `${phone.slice(0, 3)}***${phone.slice(-2)}`;
@@ -54,6 +87,30 @@ const sendWhatsappMock = (order: DemoOrder, template: string) => {
 };
 
 app.get("/health", async () => ({ ok: true, service: "pedidos-api" }));
+app.get("/ready", async () => ({ ready: true, dependencies: { memoryRepository: "ok" } }));
+app.post("/v1/auth/login", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request, reply) => {
+  const { email, password } = request.body as { email?: string; password?: string };
+  if (!email || !password) return problem(reply, 400, "CREDENCIALES_REQUERIDAS", "Correo y contraseña son obligatorios.");
+  const session = await login(email, password, env);
+  if (!session) return problem(reply, 401, "CREDENCIALES_INVALIDAS", "Correo o contraseña incorrectos.");
+  reply.setCookie("refresh_token", session.refreshToken, {
+    httpOnly: true, sameSite: "strict", secure: env.NODE_ENV === "production", path: "/v1/auth", maxAge: 7 * 24 * 60 * 60,
+  });
+  return { accessToken: session.accessToken, user: session.principal };
+});
+app.post("/v1/auth/refresh", async (request, reply) => {
+  const token = request.cookies.refresh_token;
+  if (!token) return problem(reply, 401, "REFRESH_REQUERIDO", "La sesión debe renovarse.");
+  try {
+    const session = await refresh(token, env);
+    reply.setCookie("refresh_token", session.refreshToken, {
+      httpOnly: true, sameSite: "strict", secure: env.NODE_ENV === "production", path: "/v1/auth", maxAge: 7 * 24 * 60 * 60,
+    });
+    return { accessToken: session.accessToken };
+  } catch {
+    return problem(reply, 401, "REFRESH_INVALIDO", "La sesión no se pudo renovar.");
+  }
+});
 app.get("/v1/public/:slug/menu", async (request, reply) => {
   if ((request.params as { slug: string }).slug !== store.slug) return problem(reply, 404, "STORE_NOT_FOUND", "Tienda no encontrada.");
   return { store, catalog, generatedAt: new Date().toISOString() };
@@ -65,20 +122,26 @@ app.post("/v1/public/:slug/coverage", async (request, reply) => {
   const covered = body.lat <= zone.bounds.north && body.lat >= zone.bounds.south && body.lng <= zone.bounds.east && body.lng >= zone.bounds.west;
   return covered ? { covered, zoneId: zone.id, feeCents: zone.feeCents, etaMin: store.etaMin } : { covered: false };
 });
-app.post("/v1/public/:slug/quote", async (request, reply) => {
+app.post("/v1/public/:slug/quote", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (request, reply) => {
+  if ((request.params as { slug: string }).slug !== store.slug) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
   const input = parse(quoteRequestSchema.safeParse(request.body), reply);
   if (!input) return;
   return quote(input.cart, catalog, store, input.address, couponFor(input.couponCode), new Date());
 });
-app.post("/v1/public/:slug/orders", async (request, reply) => {
+app.post("/v1/public/:slug/orders", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request, reply) => {
+  if ((request.params as { slug: string }).slug !== store.slug) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
   const key = request.headers["idempotency-key"];
   if (!key || Array.isArray(key)) return problem(reply, 400, "IDEMPOTENCY_KEY_REQUIRED", "Envía Idempotency-Key.");
-  const previous = idempotency.get(key);
+  const tenantKey = `${tenantId}:${key}`;
+  const previous = idempotency.get(tenantKey);
   if (previous) return reply.status(200).send(orders.get(previous));
   const input = parse(createOrderSchema.safeParse(request.body), reply);
   if (!input) return;
   const calculated = quote(input.cart, catalog, store, input.address, couponFor(input.couponCode), new Date());
-  if (calculated.errors.length) return problem(reply, 422, "QUOTE_INVALID", "El carrito no se puede procesar.", { quote: calculated });
+  if (calculated.errors.length) {
+    const outOfStock = calculated.errors.some((error) => error.startsWith("OUT_OF_STOCK"));
+    return problem(reply, outOfStock ? 409 : 422, outOfStock ? "OUT_OF_STOCK" : "QUOTE_INVALID", "El carrito no se puede procesar.", { quote: calculated });
+  }
   if (calculated.totalCents !== input.expectedTotalCents)
     return problem(reply, 409, "PRICE_CHANGED", "El total del carrito cambió.", { quote: calculated });
 
@@ -99,6 +162,7 @@ app.post("/v1/public/:slug/orders", async (request, reply) => {
   const id = randomUUID();
   const order: DemoOrder = {
     id,
+    tenantId,
     token: randomBytes(24).toString("base64url"),
     number: orders.size + 1,
     status: "new",
@@ -113,7 +177,7 @@ app.post("/v1/public/:slug/orders", async (request, reply) => {
     events: [{ from: null, to: "new", actor: "cliente", at: now }],
   };
   orders.set(id, order);
-  idempotency.set(key, id);
+  idempotency.set(tenantKey, id);
   sendWhatsappMock(order, "order_received");
   broadcast("order.new", order);
   return reply.status(201).send(order);
@@ -147,11 +211,12 @@ app.get("/v1/events", { preHandler: privateGuard }, async (request, reply) => {
 });
 app.get("/v1/orders", { preHandler: privateGuard }, async (request) => {
   const status = (request.query as { status?: OrderStatus }).status;
-  return [...orders.values()].filter((order) => !status || order.status === status);
+  const principal = principals.get(request)!;
+  return [...orders.values()].filter((order) => order.tenantId === principal.tenantId && (!status || order.status === status));
 });
 app.patch("/v1/orders/:id/transition", { preHandler: privateGuard }, async (request, reply) => {
   const order = orders.get((request.params as { id: string }).id);
-  if (!order) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  if (!order || order.tenantId !== principals.get(request)!.tenantId) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
   const input = parse(transitionRequestSchema.safeParse(request.body), reply);
   if (!input) return;
   if (input.version !== order.version) return problem(reply, 412, "VERSION_CONFLICT", "El pedido cambió en otro dispositivo.", { order });
@@ -174,7 +239,15 @@ app.patch("/v1/orders/:id/transition", { preHandler: privateGuard }, async (requ
   return order;
 });
 app.post("/v1/orders/:id/assign-courier", { preHandler: privateGuard }, async (request) => ({ ok: true, orderId: (request.params as { id: string }).id, courier: request.body }));
-app.post("/v1/orders/:id/payment/validate", { preHandler: privateGuard }, async (request) => ({ ok: true, orderId: (request.params as { id: string }).id, paymentStatus: "paid" }));
+app.post("/v1/orders/:id/payment/validate", { preHandler: privateGuard }, async (request, reply) => {
+  const order = orders.get((request.params as { id: string }).id);
+  if (!order || order.tenantId !== principals.get(request)!.tenantId) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  const payment = await paymentProvider.createPayment({
+    tenantId: order.tenantId, orderId: order.id, amountCents: order.quote.totalCents, currency: "COP",
+    idempotencyKey: `payment:${order.id}`,
+  });
+  return { ok: true, orderId: order.id, paymentStatus: payment.status, providerId: payment.providerId };
+});
 
 app.get("/v1/products", { preHandler: privateGuard }, async () => catalog.products);
 app.post("/v1/products", { preHandler: privateGuard }, async (request, reply) => {
@@ -221,6 +294,24 @@ app.patch("/v1/store/status", { preHandler: privateGuard }, async (request) => {
   return store;
 });
 app.get("/v1/whatsapp/logs", { preHandler: privateGuard }, async () => whatsappLogs);
+app.get("/v1/customers/:phone/export", { preHandler: privateGuard }, async (request) => {
+  const phone = (request.params as { phone: string }).phone;
+  const principal = principals.get(request)!;
+  return {
+    customer: { phone },
+    orders: [...orders.values()].filter((order) => order.tenantId === principal.tenantId && order.customer.phone === phone),
+    generatedAt: new Date().toISOString(),
+  };
+});
+app.delete("/v1/customers/:phone", { preHandler: privateGuard }, async (request, reply) => {
+  const phone = (request.params as { phone: string }).phone;
+  const principal = principals.get(request)!;
+  for (const order of orders.values()) {
+    if (order.tenantId === principal.tenantId && order.customer.phone === phone)
+      order.customer = { ...order.customer, name: "Cliente eliminado", phone: `deleted-${randomUUID()}` };
+  }
+  return reply.status(204).send();
+});
 
-const port = Number(process.env.API_PORT ?? 4000);
-await app.listen({ port, host: "0.0.0.0" });
+export { app };
+if (env.NODE_ENV !== "test") await app.listen({ port: env.API_PORT, host: "0.0.0.0" });

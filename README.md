@@ -25,8 +25,8 @@ Abre:
 - API: http://localhost:4000/health
 
 La API usa un repositorio en memoria para que el recorrido completo funcione sin
-infraestructura. Reiniciar la API restablece pedidos y stock. La clave privada de demo es
-`demo-admin-key`; en producción debe reemplazarse y nunca exponerse al navegador.
+infraestructura. Reiniciar la API restablece pedidos y stock. El panel inicia sesión en
+`/ingresar`; la API key demo solo existe si se configura explícitamente `DEMO_MODE=true`.
 
 ## PostgreSQL y seed
 
@@ -87,7 +87,8 @@ packages/
 
 ### API privada
 
-Usa `X-API-Key`.
+Usa JWT Bearer obtenido en `/v1/auth/login`. Las automatizaciones pueden usar `X-API-Key`
+por tenant con scopes; las claves solo se almacenan como hash.
 
 - Pedidos, transición con versión optimista, domiciliario y pago
 - Productos, categorías, agotado, zonas y cupones
@@ -116,8 +117,8 @@ la pantalla sin conexión quedan en caché. Para una instalación real se requie
 - Redis/BullMQ, expiración automática, outbox y reintentos del worker están representados
   por puntos de entrada; falta cablearlos a colas reales.
 - WhatsApp, comprobantes, pasarela, geocodificación, mapa e importación con IA son mocks.
-- La clave del panel está expuesta solo para la demo; producción requiere sesiones HttpOnly,
-  RBAC, CSRF y aislamiento RLS.
+- La autenticación HTTP y RBAC están implementados; faltan persistencia de sesiones,
+  protección RLS y repositorio transaccional antes de producción.
 - Las pantallas secundarias del panel son esqueletos utilizables, no CRUD completos.
 - Falta una suite E2E/Playwright, pruebas de concurrencia contra PostgreSQL y auditoría WCAG.
 

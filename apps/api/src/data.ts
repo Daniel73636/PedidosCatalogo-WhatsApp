@@ -76,7 +76,8 @@ export interface DemoOrder {
   number: number;
   status: OrderStatus;
   version: number;
-  customer: { name: string; phone: string };
+  tenantId: string;
+  customer: { name: string; phone: string; privacyConsent: true; privacyPolicyVersion: string };
   cart: { items: { productId: string; quantity: number }[]; fulfillment: "delivery" | "pickup" | "dine_in" };
   quote: ReturnType<typeof import("@pedidos/domain-pricing").quote>;
   paymentMethod: string;

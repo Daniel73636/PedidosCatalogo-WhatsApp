@@ -26,6 +26,28 @@ export const stores = pgTable("stores", {
   settings: jsonb("settings").notNull().default({}),
   ...audit,
 });
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    email: text("email").notNull(),
+    passwordHash: text("password_hash").notNull(),
+    role: text("role").notNull(),
+    active: boolean("active").notNull().default(true),
+    ...audit,
+  },
+  (table) => [uniqueIndex("users_tenant_email_idx").on(table.tenantId, table.email)],
+);
+export const apiKeys = pgTable("api_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
+  name: text("name").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  scopes: text("scopes").array().notNull().default([]),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  ...audit,
+});
 export const categories = pgTable("categories", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull(),
@@ -100,6 +122,9 @@ export const customers = pgTable(
     tenantId: uuid("tenant_id").notNull(),
     name: text("name").notNull(),
     phone: text("phone").notNull(),
+    privacyConsentAt: timestamp("privacy_consent_at", { withTimezone: true }),
+    privacyPolicyVersion: text("privacy_policy_version"),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
     ...audit,
   },
   (table) => [uniqueIndex("customers_tenant_phone_idx").on(table.tenantId, table.phone)],
