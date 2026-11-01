@@ -1,4 +1,9 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string, readonly body?: unknown) {
+    super(message);
+  }
+}
 
 export interface Product {
   id: string;
@@ -41,8 +46,8 @@ export async function api<T>(path: string, init?: RequestInit, admin = false): P
     },
   });
   if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { detail?: string };
-    throw new Error(body.detail ?? `Error ${response.status}`);
+    const body = await response.json().catch(() => ({})) as { detail?: string; code?: string };
+    throw new ApiError(body.detail ?? `Error ${response.status}`, response.status, body.code, body);
   }
   return response.json() as Promise<T>;
 }
