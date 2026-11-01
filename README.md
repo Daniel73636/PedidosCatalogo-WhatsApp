@@ -28,6 +28,10 @@ Con `DATABASE_URL`, la API usa PostgreSQL/Drizzle y reserva inventario dentro de
 transacción que crea el pedido. Sin esa variable usa memoria para demo y pruebas; reiniciar
 restablece pedidos y stock. El panel inicia sesión en `/ingresar`.
 
+Para salir de demo, seguir `docs/CHECKLIST_LANZAMIENTO.md`: secretos, Postgres, CORS,
+`DEMO_MODE=false` y el orden de despliegue en Railway, Fly o un VPS. El historial de
+fases está en `docs/CHANGELOG_MEJORAS.md`.
+
 ## PostgreSQL y seed
 
 ```bash
