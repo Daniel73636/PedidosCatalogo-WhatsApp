@@ -39,7 +39,7 @@ export function Checkout({ slug }: { slug: string }) {
           address: fulfillment === "delivery" ? { label: String(form.get("address")), lat: 4.65, lng: -74.08 } : undefined,
           couponCode: couponCode || undefined,
           expectedTotalCents: quote.totalCents,
-          customer: { name: form.get("name"), phone: form.get("phone") },
+          customer: { name: form.get("name"), phone: form.get("phone"), privacyConsent: true, privacyPolicyVersion: "2026-11-01" },
           paymentMethod: form.get("payment"),
           notes: form.get("notes") || undefined,
         }),
@@ -59,6 +59,7 @@ export function Checkout({ slug }: { slug: string }) {
         <div className="field"><label htmlFor="phone">WhatsApp</label><input required pattern="\+?[1-9][0-9]{7,14}" id="phone" name="phone" defaultValue="+57300" autoComplete="tel" /></div>
         <div className="field"><label htmlFor="payment">Medio de pago</label><select id="payment" name="payment"><option value="cash">Efectivo</option><option value="transfer">Transferencia</option><option value="wallet">Billetera</option></select></div>
         <div className="field"><label htmlFor="notes">Notas (opcional)</label><textarea id="notes" name="notes" maxLength={500} /></div>
+        <div className="field"><label><input required type="checkbox" name="privacyConsent" /> Autorizo el tratamiento de mis datos para gestionar este pedido, según la política de privacidad.</label></div>
       </div><aside className="card form"><h2>Resumen</h2><div className="field"><label htmlFor="coupon">Cupón</label><input id="coupon" value={couponCode} onChange={(e) => setCoupon(e.target.value.toUpperCase())} placeholder="AREPA10" /></div>
         {!quote ? <p className="muted">Calculando…</p> : <div className="summary"><div><span>Productos</span><span>{money(quote.subtotalCents)}</span></div><div><span>Descuento</span><span>−{money(quote.discountCents)}</span></div><div><span>Envío</span><span>{money(quote.deliveryFeeCents)}</span></div><div className="total"><span>Total</span><span>{money(quote.totalCents)}</span></div>{quote.errors.map((item) => <div className="banner" key={item}>{item}</div>)}</div>}
         <button className="btn big-btn" disabled={busy || !quote || !!quote.errors.length}>{busy ? "Enviando pedido…" : "Confirmar pedido"}</button><small className="muted">Al confirmar, recibirás actualizaciones por WhatsApp (simulado en desarrollo).</small>

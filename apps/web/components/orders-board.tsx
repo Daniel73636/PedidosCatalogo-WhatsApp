@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ADMIN_KEY, API_URL, api, money, type Order } from "@/lib/api";
+import { api, money, type Order } from "@/lib/api";
 
 const columns = [
   { id: "new", label: "Nuevos" },
@@ -37,10 +37,7 @@ export function OrdersBoard({ kitchen = false }: { kitchen?: boolean }) {
   useEffect(() => {
     void load();
     const timer = setInterval(load, 10_000);
-    const stream = new EventSource(`${API_URL}/v1/events?key=${ADMIN_KEY}`);
-    stream.addEventListener("order.new", () => void load());
-    stream.addEventListener("order.updated", () => void load());
-    return () => { clearInterval(timer); stream.close(); };
+    return () => clearInterval(timer);
   }, [load]);
   const enableSound = () => {
     audio.current = new AudioContext();
