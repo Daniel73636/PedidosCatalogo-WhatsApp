@@ -24,9 +24,13 @@ Abre:
 - Cocina: http://localhost:3000/cocina
 - API: http://localhost:4000/health
 
-La API usa un repositorio en memoria para que el recorrido completo funcione sin
-infraestructura. Reiniciar la API restablece pedidos y stock. La clave privada de demo es
-`demo-admin-key`; en producción debe reemplazarse y nunca exponerse al navegador.
+Con `DATABASE_URL`, la API usa PostgreSQL/Drizzle y reserva inventario dentro de la misma
+transacción que crea el pedido. Sin esa variable usa memoria para demo y pruebas; reiniciar
+restablece pedidos y stock. El panel inicia sesión en `/ingresar`.
+
+Para salir de demo, seguir `docs/CHECKLIST_LANZAMIENTO.md`: secretos, Postgres, CORS,
+`DEMO_MODE=false` y el orden de despliegue en Railway, Fly o un VPS. El historial de
+fases está en `docs/CHANGELOG_MEJORAS.md`.
 
 ## PostgreSQL y seed
 
@@ -35,7 +39,12 @@ docker compose up -d postgres redis
 copy .env.example .env
 pnpm db:push
 pnpm db:seed
+pnpm db:migrate
 ```
+
+La migración RLS aditiva y sus instrucciones están en `docs/RLS.md`.
+El seed crea el usuario local `admin@arepa.test` para `arepa-express`; no usar esas
+credenciales fuera de desarrollo.
 
 El seed crea **Arepa Express** (`arepa-express`), categorías, productos, salsas y una
 zona de entrega. El esquema Drizzle usa `tenant_id`, importes enteros en centavos,
@@ -53,6 +62,7 @@ docker compose up --build
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm test:e2e
 ```
 
 `packages/domain-pricing` contiene `quote()` puro y determinista. Las pruebas cubren
@@ -87,7 +97,8 @@ packages/
 
 ### API privada
 
-Usa `X-API-Key`.
+Usa JWT Bearer obtenido en `/v1/auth/login`. Las automatizaciones pueden usar `X-API-Key`
+por tenant con scopes; las claves solo se almacenan como hash.
 
 - Pedidos, transición con versión optimista, domiciliario y pago
 - Productos, categorías, agotado, zonas y cupones
@@ -111,15 +122,13 @@ la pantalla sin conexión quedan en caché. Para una instalación real se requie
 
 ## Límites conocidos del MVP
 
-- El recorrido demo de la API usa memoria; el esquema y seed PostgreSQL están listos,
-  pero falta conectar un repositorio persistente/transaccional antes de producción.
-- Redis/BullMQ, expiración automática, outbox y reintentos del worker están representados
-  por puntos de entrada; falta cablearlos a colas reales.
-- WhatsApp, comprobantes, pasarela, geocodificación, mapa e importación con IA son mocks.
-- La clave del panel está expuesta solo para la demo; producción requiere sesiones HttpOnly,
-  RBAC, CSRF y aislamiento RLS.
-- Las pantallas secundarias del panel son esqueletos utilizables, no CRUD completos.
-- Falta una suite E2E/Playwright, pruebas de concurrencia contra PostgreSQL y auditoría WCAG.
+- Sin `DATABASE_URL`, o con `DEMO_MODE=true`, pedidos, sesiones y catálogo viven en memoria.
+- Redis/BullMQ, expiración automática, outbox y reintentos del worker siguen como puntos de entrada.
+- WhatsApp Cloud, geocodificación, mapa e importación con IA siguen en mock.
+- Wompi es un stub con flag: firma HMAC local e idempotencia persistida, sin checkout real.
+- Zonas, promos, clientes e importación del panel siguen siendo pantallas de apoyo, no CRUD completo.
+- CI aplica RLS, pero el rol de PostgreSQL del workflow es superusuario y no demuestra `FORCE RLS`.
+- La cola offline reintenta al volver `online`; Background Sync del service worker queda pendiente.
 
 Estas brechas están explicitadas para no confundir el MVP ejecutable con una puesta en
 producción que maneje dinero y datos reales.

@@ -28,6 +28,8 @@ export const createOrderSchema = quoteRequestSchema.extend({
   customer: z.object({
     name: z.string().trim().min(2).max(100),
     phone: z.string().regex(/^\+?[1-9]\d{7,14}$/),
+    privacyConsent: z.literal(true),
+    privacyPolicyVersion: z.string().min(1).max(20),
   }),
   paymentMethod: z.enum(["cash", "transfer", "wallet", "online"]),
   cashChangeForCents: z.number().int().nonnegative().optional(),

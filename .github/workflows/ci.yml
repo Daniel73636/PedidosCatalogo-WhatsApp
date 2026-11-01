@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["feat/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-pedidos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  monorepo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pedidos
+          POSTGRES_PASSWORD: pedidos
+          POSTGRES_DB: pedidos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pedidos"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+        env:
+          JWT_SECRET: ci-secret-with-at-least-thirty-two-characters
+      - run: pnpm typecheck
+      - run: pnpm build
+        env:
+          JWT_SECRET: ci-secret-with-at-least-thirty-two-characters
+      - run: pnpm --filter @pedidos/db exec drizzle-kit push --force && pnpm db:seed && pnpm db:migrate
+        env:
+          DATABASE_URL: postgres://pedidos:pedidos@localhost:5432/pedidos
+      - run: pnpm --filter @pedidos/api exec vitest run src/repository.postgres.test.ts src/auth.postgres.test.ts
+        env:
+          TEST_DATABASE_URL: postgres://pedidos:pedidos@localhost:5432/pedidos
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - run: pnpm audit --prod
+        continue-on-error: true

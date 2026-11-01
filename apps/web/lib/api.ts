@@ -1,10 +1,15 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-export const ADMIN_KEY = process.env.NEXT_PUBLIC_DEMO_ADMIN_KEY ?? "demo-admin-key";
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string, readonly body?: unknown) {
+    super(message);
+  }
+}
 
 export interface Product {
   id: string;
   categoryId: string;
   name: string;
+  description?: string;
   basePriceCents: number;
   status: "active" | "sold_out" | "hidden";
   stockQty?: number;
@@ -31,17 +36,19 @@ export const money = (cents: number) =>
   new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(cents / 100);
 
 export async function api<T>(path: string, init?: RequestInit, admin = false): Promise<T> {
+  const accessToken = admin && typeof window !== "undefined" ? localStorage.getItem("pedidos-access-token") : null;
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(admin ? { "X-API-Key": ADMIN_KEY } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...init?.headers,
     },
   });
   if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { detail?: string };
-    throw new Error(body.detail ?? `Error ${response.status}`);
+    const body = await response.json().catch(() => ({})) as { detail?: string; code?: string };
+    throw new ApiError(body.detail ?? `Error ${response.status}`, response.status, body.code, body);
   }
   return response.json() as Promise<T>;
 }
