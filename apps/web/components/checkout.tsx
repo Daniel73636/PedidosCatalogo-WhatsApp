@@ -3,11 +3,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, api, money, type Order } from "@/lib/api";
+import { pendingOrders, queueOrder, removePendingOrder } from "@/lib/offline-orders";
 
 type CartItem = { productId: string; quantity: number };
 type Quote = { subtotalCents: number; discountCents: number; taxCents: number; deliveryFeeCents: number; totalCents: number; errors: string[] };
-type PendingOrder = { slug: string; key: string; payload: Record<string, unknown> };
-const PENDING_ORDER_KEY = "pedidos-pending-order";
 export function Checkout({ slug }: { slug: string }) {
   const router = useRouter();
   const [items, setItems] = useState<CartItem[]>([]);
@@ -22,19 +21,24 @@ export function Checkout({ slug }: { slug: string }) {
   }, []);
   useEffect(() => {
     const retry = async () => {
-      const raw = localStorage.getItem(PENDING_ORDER_KEY);
-      if (!raw || !navigator.onLine) return;
+      if (!navigator.onLine) return;
       try {
-        const pending = JSON.parse(raw) as PendingOrder;
-        if (pending.slug !== slug) return;
+        const queued = await pendingOrders(slug);
+        if (!queued.length) return;
         setBusy(true);
-        const order = await api<Order>(`/v1/public/${slug}/orders`, {
-          method: "POST", headers: { "Idempotency-Key": pending.key }, body: JSON.stringify(pending.payload),
-        });
-        localStorage.removeItem(PENDING_ORDER_KEY);
+        let last: Order | undefined;
+        for (const pending of queued) {
+          last = await api<Order>(`/v1/public/${slug}/orders`, {
+            method: "POST", headers: { "Idempotency-Key": pending.key }, body: JSON.stringify(pending.payload),
+          });
+          await removePendingOrder(pending.key);
+        }
         localStorage.removeItem("pedidos-cart");
-        router.push(`/pedido/${order.token}`);
-      } catch { setBusy(false); }
+        if (last) router.push(`/pedido/${last.token}`);
+      } catch {
+        setError("Quedaron pedidos pendientes. Reintentaremos al reconectar.");
+        setBusy(false);
+      }
     };
     window.addEventListener("online", retry);
     void retry();
@@ -77,7 +81,7 @@ export function Checkout({ slug }: { slug: string }) {
         if (latest) setQuote(latest);
         setError("El precio cambió mientras confirmabas. Revisamos el total; por favor confírmalo nuevamente.");
       } else if (!navigator.onLine || cause instanceof TypeError) {
-        localStorage.setItem(PENDING_ORDER_KEY, JSON.stringify({ slug, key, payload } satisfies PendingOrder));
+        await queueOrder({ slug, key, payload, queuedAt: Date.now() });
         setQueued(true);
         setError("Guardamos tu pedido en este dispositivo. Lo enviaremos automáticamente cuando vuelva la conexión.");
       } else setError(cause instanceof Error ? cause.message : "No pudimos crear el pedido.");

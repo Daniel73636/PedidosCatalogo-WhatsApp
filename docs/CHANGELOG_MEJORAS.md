@@ -1,5 +1,14 @@
 # Changelog de mejoras
 
+## Fase 3 — crecimiento y cierre de memoria
+
+- Usuarios, refresh sessions, API keys, catálogo administrativo, estado de tienda y derechos de privacidad usan PostgreSQL por tenant; memoria permanece únicamente en modo demo.
+- RLS cubre directamente tablas hijas de catálogo y pedidos mediante `tenant_id` obligatorio.
+- Wompi stub crea intenciones pendientes, valida firma de webhook y deduplica eventos persistidos; efectivo y transferencia continúan disponibles.
+- El menú incluye compartir, QR generado localmente, metadatos Open Graph y URL canónica.
+- Reportes muestran ventas por hora, productos destacados y exportan pedidos en CSV.
+- La cola offline usa IndexedDB, reintenta todos los pendientes y conserva la misma `Idempotency-Key` al reconectar.
+
 ## Fase 2 — persistencia y experiencia operativa
 
 - PostgreSQL/Drizzle es el repositorio predeterminado cuando existe `DATABASE_URL`; memoria queda para demo y pruebas.

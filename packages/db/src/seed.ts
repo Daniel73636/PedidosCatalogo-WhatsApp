@@ -1,5 +1,6 @@
 import { createDb } from "./index.js";
-import { categories, deliveryZones, optionGroups, options, productOptionGroups, products, stores } from "./schema.js";
+import { hash } from "bcryptjs";
+import { categories, deliveryZones, optionGroups, options, productOptionGroups, products, stores, users } from "./schema.js";
 
 const tenantId = "11111111-1111-4111-8111-111111111111";
 const ids = {
@@ -36,12 +37,12 @@ await db.transaction(async (tx) => {
   ]).onConflictDoNothing();
   await tx.insert(optionGroups).values({ id: ids.salsas, tenantId, name: "Salsas", minSelect: 0, maxSelect: 2 }).onConflictDoNothing();
   await tx.insert(options).values([
-    { id: ids.ajo, groupId: ids.salsas, name: "Salsa de ajo", priceDeltaCents: 0 },
-    { id: ids.picante, groupId: ids.salsas, name: "Picante", priceDeltaCents: 0 },
+    { id: ids.ajo, tenantId, groupId: ids.salsas, name: "Salsa de ajo", priceDeltaCents: 0 },
+    { id: ids.picante, tenantId, groupId: ids.salsas, name: "Picante", priceDeltaCents: 0 },
   ]).onConflictDoNothing();
   await tx.insert(productOptionGroups).values([
-    { productId: ids.reina, groupId: ids.salsas },
-    { productId: ids.pabellon, groupId: ids.salsas },
+    { tenantId, productId: ids.reina, groupId: ids.salsas },
+    { tenantId, productId: ids.pabellon, groupId: ids.salsas },
   ]).onConflictDoNothing();
   await tx.insert(deliveryZones).values({
     id: ids.zone,
@@ -52,6 +53,9 @@ await db.transaction(async (tx) => {
     minOrderCents: 1500000,
     freeOverCents: 5000000,
     etaMin: 35,
+  }).onConflictDoNothing();
+  await tx.insert(users).values({
+    tenantId, email: "admin@arepa.test", passwordHash: await hash("Cambiar123!", 12), role: "owner",
   }).onConflictDoNothing();
 });
 await close();

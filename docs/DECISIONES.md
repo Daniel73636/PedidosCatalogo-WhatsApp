@@ -27,3 +27,15 @@
 ## 2026-11-01 — Repositorio PostgreSQL y RLS
 
 **Decisión:** `DATABASE_URL` selecciona PostgreSQL por defecto; memoria queda para demo/pruebas. Pedido, idempotencia, numeración y reserva de stock comparten transacción. Un advisory lock por tenant serializa numeración/idempotencia y el `UPDATE ... WHERE stock_qty >= cantidad` evita sobreventa. RLS usa contexto local a la transacción; el rol de aplicación no debe tener `BYPASSRLS`.
+
+## 2026-11-01 — RLS en tablas hijas
+
+**Decisión:** duplicar `tenant_id` en variantes, opciones, relaciones producto-opción, ítems, eventos y reservas. Aunque el tenant se deriva del padre, la columna directa permite `FORCE ROW LEVEL SECURITY`, filtros explícitos e índices sin depender de que cada consulta haga el join correcto.
+
+## 2026-11-01 — Sesiones y webhooks persistentes
+
+**Decisión:** usuarios, API keys y refresh sessions se resuelven en PostgreSQL cuando existe `DATABASE_URL`. La rotación revoca el JTI anterior. Los eventos Wompi firmados se registran con restricción única `(provider, provider_event_id)` antes de actualizar el pago, de modo que un reintento responde como duplicado sin volver a aplicar efectos. La firma del stub es HMAC-SHA256 del JSON; no replica el checksum de producción de Wompi. Efectivo y transferencia siguen disponibles con el flag apagado.
+
+## 2026-11-01 — Cola offline
+
+**Decisión:** pedidos pendientes viven en IndexedDB, no `localStorage`, conservando payload e `Idempotency-Key`. La reconexión reintenta el mismo pedido; Background Sync del service worker queda como mejora posterior.

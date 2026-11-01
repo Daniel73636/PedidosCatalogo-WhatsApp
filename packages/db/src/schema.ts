@@ -48,6 +48,23 @@ export const apiKeys = pgTable("api_keys", {
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   ...audit,
 });
+export const refreshSessions = pgTable("refresh_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  tokenIdHash: text("token_id_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  ...audit,
+});
+export const paymentWebhookEvents = pgTable("payment_webhook_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
+  provider: text("provider").notNull(),
+  providerEventId: text("provider_event_id").notNull(),
+  payload: jsonb("payload").notNull(),
+  processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("payment_events_provider_id_idx").on(table.provider, table.providerEventId)]);
 export const categories = pgTable("categories", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull(),
@@ -77,6 +94,7 @@ export const products = pgTable(
 );
 export const productVariants = pgTable("product_variants", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
   productId: uuid("product_id").notNull().references(() => products.id),
   name: text("name").notNull(),
   priceCents: bigint("price_cents", { mode: "number" }).notNull(),
@@ -91,6 +109,7 @@ export const optionGroups = pgTable("option_groups", {
 });
 export const options = pgTable("options", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
   groupId: uuid("group_id").notNull().references(() => optionGroups.id),
   name: text("name").notNull(),
   priceDeltaCents: bigint("price_delta_cents", { mode: "number" }).notNull().default(0),
@@ -99,6 +118,7 @@ export const options = pgTable("options", {
 export const productOptionGroups = pgTable(
   "product_option_groups",
   {
+    tenantId: uuid("tenant_id").notNull(),
     productId: uuid("product_id").notNull().references(() => products.id),
     groupId: uuid("group_id").notNull().references(() => optionGroups.id),
     position: integer("position").notNull().default(0),
@@ -157,6 +177,7 @@ export const orders = pgTable("orders", {
 ]);
 export const orderItems = pgTable("order_items", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
   orderId: uuid("order_id").notNull().references(() => orders.id),
   productId: uuid("product_id").notNull(),
   nameSnapshot: text("name_snapshot").notNull(),
@@ -168,6 +189,7 @@ export const orderItems = pgTable("order_items", {
 });
 export const orderEvents = pgTable("order_events", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
   orderId: uuid("order_id").notNull().references(() => orders.id),
   fromStatus: text("from_status"),
   toStatus: text("to_status").notNull(),
@@ -177,6 +199,7 @@ export const orderEvents = pgTable("order_events", {
 });
 export const stockReservations = pgTable("stock_reservations", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull(),
   orderId: uuid("order_id").notNull().references(() => orders.id),
   productId: uuid("product_id").notNull().references(() => products.id),
   qty: numeric("qty", { precision: 10, scale: 3 }).notNull(),

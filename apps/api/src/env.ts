@@ -11,6 +11,9 @@ const schema = z.object({
   API_KEYS: z.string().optional(),
   WHATSAPP_CLOUD_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   PAYMENTS_PROVIDER: z.enum(["mock", "wompi"]).default("mock"),
+  PAYMENT_WEBHOOK_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  WOMPI_WEBHOOK_SECRET: z.string().min(16).optional(),
+  WOMPI_PUBLIC_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof schema>;

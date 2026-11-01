@@ -45,4 +45,34 @@ describePostgres("PostgresOrderRepository", () => {
     const [product] = await direct!.db.select({ stockQty: products.stockQty }).from(products).where(eq(products.id, productId));
     expect(Number(product?.stockQty)).toBe(0);
   }, 20_000);
+
+  it("persiste administración, privacidad e idempotencia de webhooks por tenant", async () => {
+    const product = (await repository!.adminProducts(tenantId)).find(({ id }) => id === productId);
+    expect(product).toBeDefined();
+    expect((await repository!.updateProduct(tenantId, productId, { status: "sold_out" }))?.status).toBe("sold_out");
+    await repository!.updateProduct(tenantId, productId, { status: "active" });
+
+    await direct!.db.update(products).set({ stockQty: "2" }).where(eq(products.id, productId));
+    const phone = "+573009991122";
+    const now = new Date().toISOString();
+    const cart = { fulfillment: "pickup" as const, items: [{ productId, quantity: 1 }] };
+    const calculated = quote(cart, (await repository!.storeBySlug("arepa-express"))!.catalog, (await repository!.storeBySlug("arepa-express"))!.store);
+    const created = await repository!.create({
+      id: randomUUID(), tenantId, token: randomBytes(24).toString("base64url"), number: 0,
+      status: "new", version: 1,
+      customer: { name: "Cliente privacidad", phone, privacyConsent: true, privacyPolicyVersion: "2026-11-01" },
+      cart, quote: calculated, paymentMethod: "transfer", createdAt: now, updatedAt: now,
+      events: [{ from: null, to: "new", actor: "cliente", at: now }],
+    }, "privacy-export-1");
+    const exported = await repository!.exportCustomer(tenantId, phone);
+    expect(exported.customer?.name).toBe("Cliente privacidad");
+    expect(exported.orders).toHaveLength(1);
+    expect(await repository!.setPaymentStatus(tenantId, created.order.id, "paid")).toBe(true);
+    expect((await repository!.byId(tenantId, created.order.id))?.paymentStatus).toBe("paid");
+    expect(await repository!.deleteCustomer(tenantId, phone)).toBe(true);
+    expect((await repository!.exportCustomer(tenantId, phone)).customer).toBeUndefined();
+
+    expect(await repository!.claimPaymentWebhook(tenantId, "wompi", "event-1", { status: "APPROVED" })).toBe(true);
+    expect(await repository!.claimPaymentWebhook(tenantId, "wompi", "event-1", { status: "APPROVED" })).toBe(false);
+  });
 });
