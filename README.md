@@ -35,9 +35,12 @@ docker compose up -d postgres redis
 copy .env.example .env
 pnpm db:push
 pnpm db:seed
+pnpm db:migrate
 ```
 
 La migración RLS aditiva y sus instrucciones están en `docs/RLS.md`.
+El seed crea el usuario local `admin@arepa.test` para `arepa-express`; no usar esas
+credenciales fuera de desarrollo.
 
 El seed crea **Arepa Express** (`arepa-express`), categorías, productos, salsas y una
 zona de entrega. El esquema Drizzle usa `tenant_id`, importes enteros en centavos,
@@ -115,15 +118,13 @@ la pantalla sin conexión quedan en caché. Para una instalación real se requie
 
 ## Límites conocidos del MVP
 
-- El recorrido demo de la API usa memoria; el esquema y seed PostgreSQL están listos,
-  pero falta conectar un repositorio persistente/transaccional antes de producción.
-- Redis/BullMQ, expiración automática, outbox y reintentos del worker están representados
-  por puntos de entrada; falta cablearlos a colas reales.
-- WhatsApp, comprobantes, pasarela, geocodificación, mapa e importación con IA son mocks.
-- La autenticación HTTP y RBAC están implementados; faltan persistencia de sesiones,
-  protección RLS y repositorio transaccional antes de producción.
-- Las pantallas secundarias del panel son esqueletos utilizables, no CRUD completos.
-- Falta una suite E2E/Playwright, pruebas de concurrencia contra PostgreSQL y auditoría WCAG.
+- Sin `DATABASE_URL`, o con `DEMO_MODE=true`, pedidos, sesiones y catálogo viven en memoria.
+- Redis/BullMQ, expiración automática, outbox y reintentos del worker siguen como puntos de entrada.
+- WhatsApp Cloud, geocodificación, mapa e importación con IA siguen en mock.
+- Wompi es un stub con flag: firma HMAC local e idempotencia persistida, sin checkout real.
+- Zonas, promos, clientes e importación del panel siguen siendo pantallas de apoyo, no CRUD completo.
+- CI aplica RLS, pero el rol de PostgreSQL del workflow es superusuario y no demuestra `FORCE RLS`.
+- La cola offline reintenta al volver `online`; Background Sync del service worker queda pendiente.
 
 Estas brechas están explicitadas para no confundir el MVP ejecutable con una puesta en
 producción que maneje dinero y datos reales.

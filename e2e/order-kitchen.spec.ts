@@ -26,7 +26,7 @@ test("menú público crea pedido y cocina lo recibe", async ({ page, request }) 
   const order = await created.json() as { number: number };
 
   const authenticated = await request.post(`${apiUrl}/v1/auth/login`, {
-    data: { email: "admin@arepa.test", password: "Cambiar123!" },
+    data: { tenantSlug: "arepa-express", email: "admin@arepa.test", password: "Cambiar123!" },
   });
   const { accessToken } = await authenticated.json() as { accessToken: string };
   await page.addInitScript((token) => localStorage.setItem("pedidos-access-token", token), accessToken);

@@ -9,6 +9,7 @@
     "test": "turbo test",
     "test:e2e": "playwright test",
     "db:push": "pnpm --filter @pedidos/db db:push",
+    "db:migrate": "pnpm --filter @pedidos/db migrate",
     "db:seed": "pnpm --filter @pedidos/db seed"
   },
   "devDependencies": {

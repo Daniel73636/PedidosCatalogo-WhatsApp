@@ -11,6 +11,7 @@ export const catalog: Catalog = {
       id: "reina-pepiada",
       categoryId: "arepas",
       name: "Reina Pepiada",
+      description: "Pollo, aguacate y mayonesa de la casa.",
       basePriceCents: 1_800_000,
       taxRateBp: 800,
       status: "active",
@@ -31,6 +32,7 @@ export const catalog: Catalog = {
       id: "pabellon",
       categoryId: "arepas",
       name: "Pabellón",
+      description: "Carne mechada, frijoles, plátano y queso.",
       basePriceCents: 2_200_000,
       taxRateBp: 800,
       status: "active",
@@ -41,6 +43,7 @@ export const catalog: Catalog = {
       id: "papelon",
       categoryId: "bebidas",
       name: "Papelón con limón",
+      description: "Refrescante bebida artesanal.",
       basePriceCents: 700_000,
       taxRateBp: 1900,
       status: "active",
@@ -81,6 +84,7 @@ export interface DemoOrder {
   cart: { items: { productId: string; quantity: number }[]; fulfillment: "delivery" | "pickup" | "dine_in" };
   quote: ReturnType<typeof import("@pedidos/domain-pricing").quote>;
   paymentMethod: string;
+  paymentStatus?: "pending" | "paid" | "declined" | "refunded";
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -88,4 +92,4 @@ export interface DemoOrder {
 }
 export const orders = new Map<string, DemoOrder>();
 export const idempotency = new Map<string, string>();
-export const whatsappLogs: { at: string; recipient: string; template: string; orderId: string; payload: object }[] = [];
+export const whatsappLogs: { tenantId: string; at: string; recipient: string; template: string; orderId: string; payload: object }[] = [];

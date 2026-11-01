@@ -9,6 +9,7 @@ export interface Product {
   id: string;
   categoryId: string;
   name: string;
+  description?: string;
   basePriceCents: number;
   status: "active" | "sold_out" | "hidden";
   stockQty?: number;

@@ -6,8 +6,8 @@ import rateLimit from "@fastify/rate-limit";
 import { createOrderSchema, productInputSchema, quoteRequestSchema, transitionRequestSchema } from "@pedidos/contracts";
 import { quote, transition, type Cart, type OrderStatus } from "@pedidos/domain-pricing";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
-import { login, principalFromApiKey, refresh, seedDemoUser, verifyToken, type Principal } from "./auth.js";
-import { catalog, coupons, orders, store, tenantId, whatsappLogs, type DemoOrder } from "./data.js";
+import { closeAuth, initializeAuth, login, principalFromApiKey, refresh, verifyToken, type Principal } from "./auth.js";
+import { coupons, orders, type DemoOrder } from "./data.js";
 import { loadEnv } from "./env.js";
 import { MockPaymentProvider, WompiPaymentProvider } from "./payments.js";
 import { MemoryOrderRepository, PostgresOrderRepository } from "./repository.js";
@@ -22,9 +22,11 @@ await app.register(cors, {
 await app.register(cookie);
 await app.register(helmet, { contentSecurityPolicy: false });
 await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
-await seedDemoUser();
+await initializeAuth(env);
 const principals = new WeakMap<FastifyRequest, Principal>();
-const paymentProvider = env.PAYMENTS_PROVIDER === "wompi" ? new WompiPaymentProvider() : new MockPaymentProvider();
+const paymentProvider = env.PAYMENTS_PROVIDER === "wompi"
+  ? new WompiPaymentProvider(env.WOMPI_WEBHOOK_SECRET, env.WOMPI_PUBLIC_KEY)
+  : new MockPaymentProvider();
 const orderRepository = env.DATABASE_URL && !env.DEMO_MODE
   ? new PostgresOrderRepository(env.DATABASE_URL)
   : new MemoryOrderRepository();
@@ -56,9 +58,8 @@ const privateGuard = async (request: FastifyRequest, reply: FastifyReply) => {
     const rawApiKey = request.headers["x-api-key"];
     const principal = authorization?.startsWith("Bearer ")
       ? await verifyToken(authorization.slice(7), env, "access")
-      : typeof rawApiKey === "string" ? principalFromApiKey(rawApiKey, env) : undefined;
+      : typeof rawApiKey === "string" ? await principalFromApiKey(rawApiKey, env) : undefined;
     if (!principal) return problem(reply, 401, "NO_AUTORIZADO", "Inicia sesión o envía una API key válida.");
-    if (principal.tenantId !== tenantId) return problem(reply, 403, "TENANT_NO_AUTORIZADO", "No tienes acceso a este comercio.");
     const route = request.routeOptions.url ?? request.url;
     const write = !["GET", "HEAD", "OPTIONS"].includes(request.method);
     const resource = route.includes("/products") || route.includes("/categories") ? "catalog"
@@ -78,7 +79,7 @@ const privateGuard = async (request: FastifyRequest, reply: FastifyReply) => {
 };
 const couponFor = (availableCoupons: typeof coupons, code?: string) => availableCoupons.find((coupon) => coupon.code === code?.toUpperCase());
 const maskPhone = (phone: string) => `${phone.slice(0, 3)}***${phone.slice(-2)}`;
-const sendWhatsappMock = (order: DemoOrder, template: string) => {
+const sendWhatsappMock = async (order: DemoOrder, template: string) => {
   const log = {
     at: new Date().toISOString(),
     recipient: maskPhone(order.customer.phone),
@@ -86,7 +87,7 @@ const sendWhatsappMock = (order: DemoOrder, template: string) => {
     orderId: order.id,
     payload: { number: order.number, status: order.status, tracking: `/pedido/${order.token}` },
   };
-  whatsappLogs.push(log);
+  await orderRepository.addWhatsappLog(order.tenantId, order.id, log.recipient, template, log.payload);
   app.log.info({ whatsapp: log }, "[WHATSAPP MOCK]");
 };
 
@@ -96,9 +97,9 @@ app.get("/ready", async (_request, reply) => {
   return reply.status(ready ? 200 : 503).send({ ready, dependencies: { orderRepository: orderRepository.kind } });
 });
 app.post("/v1/auth/login", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request, reply) => {
-  const { email, password } = request.body as { email?: string; password?: string };
-  if (!email || !password) return problem(reply, 400, "CREDENCIALES_REQUERIDAS", "Correo y contraseña son obligatorios.");
-  const session = await login(email, password, env);
+  const { tenantSlug, email, password } = request.body as { tenantSlug?: string; email?: string; password?: string };
+  if (!tenantSlug || !email || !password) return problem(reply, 400, "CREDENCIALES_REQUERIDAS", "Comercio, correo y contraseña son obligatorios.");
+  const session = await login(tenantSlug, email, password, env);
   if (!session) return problem(reply, 401, "CREDENCIALES_INVALIDAS", "Correo o contraseña incorrectos.");
   reply.setCookie("refresh_token", session.refreshToken, {
     httpOnly: true, sameSite: "strict", secure: env.NODE_ENV === "production", path: "/v1/auth", maxAge: 7 * 24 * 60 * 60,
@@ -117,6 +118,19 @@ app.post("/v1/auth/refresh", async (request, reply) => {
   } catch {
     return problem(reply, 401, "REFRESH_INVALIDO", "La sesión no se pudo renovar.");
   }
+});
+app.post("/v1/payments/wompi/webhook", async (request, reply) => {
+  if (!env.PAYMENT_WEBHOOK_ENABLED || env.PAYMENTS_PROVIDER !== "wompi")
+    return problem(reply, 404, "WEBHOOK_DESHABILITADO", "El webhook de pagos no está habilitado.");
+  const signature = request.headers["x-event-checksum"];
+  const event = paymentProvider.parseWebhook(request.body, typeof signature === "string" ? signature : undefined);
+  if (!event) return problem(reply, 401, "FIRMA_WEBHOOK_INVALIDA", "No fue posible validar el evento de pago.");
+  if (!(await orderRepository.byId(event.tenantId, event.orderId)))
+    return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  const claimed = await orderRepository.claimPaymentWebhook(event.tenantId, "wompi", event.id, event.raw);
+  if (!claimed) return { ok: true, duplicate: true };
+  await orderRepository.setPaymentStatus(event.tenantId, event.orderId, event.status);
+  return { ok: true, duplicate: false };
 });
 app.get("/v1/public/:slug/menu", async (request, reply) => {
   const context = await orderRepository.storeBySlug((request.params as { slug: string }).slug);
@@ -176,7 +190,7 @@ app.post("/v1/public/:slug/orders", { config: { rateLimit: { max: 10, timeWindow
   try {
     const persisted = await orderRepository.create(order, key);
     if (!persisted.replay) {
-      sendWhatsappMock(persisted.order, "order_received");
+      await sendWhatsappMock(persisted.order, "order_received");
       broadcast("order.new", persisted.order);
     }
     return reply.status(persisted.replay ? 200 : 201).send(persisted.order);
@@ -230,11 +244,16 @@ app.patch("/v1/orders/:id/transition", { preHandler: privateGuard }, async (requ
   const changed = await orderRepository.transition(principal.tenantId, order.id, input.version, next, input.actor, input.reason);
   if (changed === "VERSION_CONFLICT") return problem(reply, 412, "VERSION_CONFLICT", "El pedido cambió en otro dispositivo.", { order });
   if (!changed) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
-  sendWhatsappMock(changed, `order_${next}`);
+  await sendWhatsappMock(changed, `order_${next}`);
   broadcast("order.updated", changed);
   return changed;
 });
-app.post("/v1/orders/:id/assign-courier", { preHandler: privateGuard }, async (request) => ({ ok: true, orderId: (request.params as { id: string }).id, courier: request.body }));
+app.post("/v1/orders/:id/assign-courier", { preHandler: privateGuard }, async (request, reply) => {
+  const orderId = (request.params as { id: string }).id;
+  if (!(await orderRepository.byId(principals.get(request)!.tenantId, orderId)))
+    return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  return { ok: true, orderId, courier: request.body };
+});
 app.post("/v1/orders/:id/payment/validate", { preHandler: privateGuard }, async (request, reply) => {
   const order = await orderRepository.byId(principals.get(request)!.tenantId, (request.params as { id: string }).id);
   if (!order) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
@@ -242,73 +261,86 @@ app.post("/v1/orders/:id/payment/validate", { preHandler: privateGuard }, async 
     tenantId: order.tenantId, orderId: order.id, amountCents: order.quote.totalCents, currency: "COP",
     idempotencyKey: `payment:${order.id}`,
   });
-  return { ok: true, orderId: order.id, paymentStatus: payment.status, providerId: payment.providerId };
+  const paymentStatus = payment.status === "approved" ? "paid" : "pending";
+  await orderRepository.setPaymentStatus(order.tenantId, order.id, paymentStatus);
+  return { ok: true, orderId: order.id, paymentStatus, providerId: payment.providerId };
 });
 
-app.get("/v1/products", { preHandler: privateGuard }, async () => catalog.products);
+app.get("/v1/products", { preHandler: privateGuard }, async (request) => orderRepository.adminProducts(principals.get(request)!.tenantId));
 app.post("/v1/products", { preHandler: privateGuard }, async (request, reply) => {
   const input = parse(productInputSchema.safeParse(request.body), reply);
   if (!input) return;
-  const product = { id: randomUUID(), ...input, optionGroups: [] };
-  catalog.products.push(product);
+  const product = await orderRepository.createProduct(principals.get(request)!.tenantId, input);
   return reply.status(201).send(product);
 });
 app.patch("/v1/products/:id", { preHandler: privateGuard }, async (request, reply) => {
-  const product = catalog.products.find(({ id }) => id === (request.params as { id: string }).id);
+  const product = await orderRepository.updateProduct(principals.get(request)!.tenantId, (request.params as { id: string }).id, request.body as never);
   if (!product) return problem(reply, 404, "PRODUCT_NOT_FOUND", "Producto no encontrado.");
-  Object.assign(product, request.body);
   broadcast("catalog.updated", { productId: product.id });
   return product;
 });
 app.delete("/v1/products/:id", { preHandler: privateGuard }, async (request, reply) => {
-  const product = catalog.products.find(({ id }) => id === (request.params as { id: string }).id);
+  const product = await orderRepository.updateProduct(principals.get(request)!.tenantId, (request.params as { id: string }).id, { status: "hidden" });
   if (!product) return problem(reply, 404, "PRODUCT_NOT_FOUND", "Producto no encontrado.");
-  product.status = "hidden";
   return reply.status(204).send();
 });
 app.post("/v1/products/:id/sold-out", { preHandler: privateGuard }, async (request, reply) => {
-  const product = catalog.products.find(({ id }) => id === (request.params as { id: string }).id);
+  const current = (await orderRepository.adminProducts(principals.get(request)!.tenantId))
+    .find(({ id }) => id === (request.params as { id: string }).id);
+  const product = current && await orderRepository.updateProduct(principals.get(request)!.tenantId, current.id, {
+    status: current.status === "sold_out" ? "active" : "sold_out",
+  });
   if (!product) return problem(reply, 404, "PRODUCT_NOT_FOUND", "Producto no encontrado.");
-  product.status = product.status === "sold_out" ? "active" : "sold_out";
   broadcast("catalog.updated", { productId: product.id, status: product.status });
   return product;
 });
-app.get("/v1/categories", { preHandler: privateGuard }, async () => catalog.categories);
-app.get("/v1/delivery-zones", { preHandler: privateGuard }, async () => store.deliveryZones);
-app.get("/v1/coupons", { preHandler: privateGuard }, async () => coupons);
+app.get("/v1/categories", { preHandler: privateGuard }, async (request) => (await orderRepository.adminLists(principals.get(request)!.tenantId)).categories);
+app.get("/v1/delivery-zones", { preHandler: privateGuard }, async (request) => (await orderRepository.adminLists(principals.get(request)!.tenantId)).zones);
+app.get("/v1/coupons", { preHandler: privateGuard }, async (request) => (await orderRepository.adminLists(principals.get(request)!.tenantId)).coupons);
 app.post("/v1/menu-import", { preHandler: privateGuard }, async () => ({ id: randomUUID(), status: "needs_review", mock: true }));
 app.get("/v1/menu-import/:id", { preHandler: privateGuard }, async (request) => ({ id: (request.params as { id: string }).id, status: "needs_review", suggestions: [] }));
-app.get("/v1/reports/summary", { preHandler: privateGuard }, async () => {
-  const all = await orderRepository.list(tenantId);
-  return { orders: all.length, salesCents: all.filter(({ status }) => status === "delivered").reduce((sum, order) => sum + order.quote.totalCents, 0), topProducts: [] };
+app.get("/v1/reports/summary", { preHandler: privateGuard }, async (request) => {
+  const all = await orderRepository.list(principals.get(request)!.tenantId);
+  const delivered = all.filter(({ status }) => status === "delivered");
+  const productTotals = new Map<string, number>();
+  const hourly = new Map<number, number>();
+  for (const order of delivered) {
+    hourly.set(new Date(order.createdAt).getHours(), (hourly.get(new Date(order.createdAt).getHours()) ?? 0) + order.quote.totalCents);
+    for (const line of order.quote.lines) productTotals.set(line.name, (productTotals.get(line.name) ?? 0) + line.quantity);
+  }
+  return {
+    orders: all.length, salesCents: delivered.reduce((sum, order) => sum + order.quote.totalCents, 0),
+    salesByHour: [...hourly].sort(([a], [b]) => a - b).map(([hour, salesCents]) => ({ hour, salesCents })),
+    topProducts: [...productTotals].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, quantity]) => ({ name, quantity })),
+  };
+});
+app.get("/v1/reports/orders.csv", { preHandler: privateGuard }, async (request, reply) => {
+  const all = await orderRepository.list(principals.get(request)!.tenantId);
+  const escape = (value: unknown) => `"${String(value).replaceAll("\"", "\"\"")}"`;
+  const csv = ["numero,fecha,estado,total_cop,cliente", ...all.map((order) =>
+    [order.number, order.createdAt, order.status, order.quote.totalCents / 100, order.customer.name].map(escape).join(","))].join("\n");
+  return reply.type("text/csv; charset=utf-8").header("Content-Disposition", "attachment; filename=pedidos.csv").send(`\uFEFF${csv}`);
 });
 app.patch("/v1/store/status", { preHandler: privateGuard }, async (request) => {
   const status = (request.body as { status: "open" | "paused" | "closed" }).status;
-  store.status = status;
-  store.open = status === "open";
-  broadcast("store.updated", store);
-  return store;
+  await orderRepository.setStoreStatus(principals.get(request)!.tenantId, status);
+  broadcast("store.updated", { status });
+  return { status, open: status === "open" };
 });
-app.get("/v1/whatsapp/logs", { preHandler: privateGuard }, async () => whatsappLogs);
+app.get("/v1/whatsapp/logs", { preHandler: privateGuard }, async (request) =>
+  orderRepository.listWhatsappLogs(principals.get(request)!.tenantId));
 app.get("/v1/customers/:phone/export", { preHandler: privateGuard }, async (request) => {
   const phone = (request.params as { phone: string }).phone;
   const principal = principals.get(request)!;
-  return {
-    customer: { phone },
-    orders: [...orders.values()].filter((order) => order.tenantId === principal.tenantId && order.customer.phone === phone),
-    generatedAt: new Date().toISOString(),
-  };
+  return { ...(await orderRepository.exportCustomer(principal.tenantId, phone)), generatedAt: new Date().toISOString() };
 });
 app.delete("/v1/customers/:phone", { preHandler: privateGuard }, async (request, reply) => {
   const phone = (request.params as { phone: string }).phone;
   const principal = principals.get(request)!;
-  for (const order of orders.values()) {
-    if (order.tenantId === principal.tenantId && order.customer.phone === phone)
-      order.customer = { ...order.customer, name: "Cliente eliminado", phone: `deleted-${randomUUID()}` };
-  }
-  return reply.status(204).send();
+  const deleted = await orderRepository.deleteCustomer(principal.tenantId, phone);
+  return deleted ? reply.status(204).send() : problem(reply, 404, "CLIENTE_NO_ENCONTRADO", "Cliente no encontrado.");
 });
 
 export { app };
-app.addHook("onClose", async () => orderRepository.close());
+app.addHook("onClose", async () => { await Promise.all([orderRepository.close(), closeAuth()]); });
 if (env.NODE_ENV !== "test") await app.listen({ port: env.API_PORT, host: "0.0.0.0" });

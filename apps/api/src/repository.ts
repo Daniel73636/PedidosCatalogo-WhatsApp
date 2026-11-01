@@ -1,11 +1,12 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import {
   categories, coupons as couponRows, createDb, customers, deliveryZones, optionGroups, options,
-  orderEvents, orderItems, orders as orderRows, productOptionGroups, products, stores,
-  stockReservations,
+  orderEvents, orderItems, orders as orderRows, paymentWebhookEvents, productOptionGroups, products, stores,
+  stockReservations, whatsappLogs as whatsappLogRows,
 } from "@pedidos/db";
-import type { Catalog, Coupon, OrderStatus, Store } from "@pedidos/domain-pricing";
-import { idempotency, orders, catalog, coupons, store, tenantId as demoTenantId, type DemoOrder } from "./data.js";
+import type { Catalog, Coupon, OrderStatus, Product, Store } from "@pedidos/domain-pricing";
+import { idempotency, orders, catalog, coupons, store, tenantId as demoTenantId, whatsappLogs, type DemoOrder } from "./data.js";
 
 export interface StoreContext {
   tenantId: string;
@@ -23,11 +24,23 @@ export interface OrderRepository {
   byId(tenantId: string, id: string): Promise<DemoOrder | undefined>;
   byToken(token: string): Promise<DemoOrder | undefined>;
   transition(tenantId: string, id: string, expectedVersion: number, next: OrderStatus, actor: string, reason?: string): Promise<DemoOrder | "VERSION_CONFLICT" | undefined>;
+  adminProducts(tenantId: string): Promise<Product[]>;
+  createProduct(tenantId: string, input: Omit<Product, "id" | "optionGroups">): Promise<Product>;
+  updateProduct(tenantId: string, id: string, changes: Partial<Product>): Promise<Product | undefined>;
+  adminLists(tenantId: string): Promise<{ categories: Catalog["categories"]; zones: Store["deliveryZones"]; coupons: Coupon[] }>;
+  setStoreStatus(tenantId: string, status: "open" | "paused" | "closed"): Promise<void>;
+  exportCustomer(tenantId: string, phone: string): Promise<{ customer: { name: string; phone: string } | undefined; orders: DemoOrder[] }>;
+  deleteCustomer(tenantId: string, phone: string): Promise<boolean>;
+  claimPaymentWebhook(tenantId: string, provider: string, eventId: string, payload: object): Promise<boolean>;
+  setPaymentStatus(tenantId: string, orderId: string, status: "pending" | "paid" | "declined" | "refunded"): Promise<boolean>;
+  addWhatsappLog(tenantId: string, orderId: string, recipient: string, template: string, payload: object): Promise<void>;
+  listWhatsappLogs(tenantId: string): Promise<{ recipient: string; template: string; orderId: string | null; payload: object; at: string }[]>;
   close(): Promise<void>;
 }
 
 export class MemoryOrderRepository implements OrderRepository {
   readonly kind = "memory";
+  private readonly paymentEvents = new Set<string>();
   async ready() { return true; }
   async storeBySlug(slug: string) {
     return slug === store.slug ? { tenantId: demoTenantId, store, catalog, coupons } : undefined;
@@ -75,6 +88,50 @@ export class MemoryOrderRepository implements OrderRepository {
     }
     return order;
   }
+  async adminProducts() { return catalog.products; }
+  async createProduct(_tenantId: string, input: Omit<Product, "id" | "optionGroups">) {
+    const product = { id: randomUUID(), ...input, optionGroups: [] };
+    catalog.products.push(product);
+    return product;
+  }
+  async updateProduct(_tenantId: string, id: string, changes: Partial<Product>) {
+    const product = catalog.products.find((entry) => entry.id === id);
+    if (product) Object.assign(product, changes);
+    return product;
+  }
+  async adminLists() { return { categories: catalog.categories, zones: store.deliveryZones, coupons }; }
+  async setStoreStatus(_tenantId: string, status: "open" | "paused" | "closed") { store.status = status; store.open = status === "open"; }
+  async exportCustomer(currentTenant: string, phone: string) {
+    const matching = [...orders.values()].filter((order) => order.tenantId === currentTenant && order.customer.phone === phone);
+    return { customer: matching[0]?.customer, orders: matching };
+  }
+  async deleteCustomer(currentTenant: string, phone: string) {
+    let found = false;
+    for (const order of orders.values()) if (order.tenantId === currentTenant && order.customer.phone === phone) {
+      found = true;
+      order.customer = { ...order.customer, name: "Cliente eliminado", phone: `deleted-${randomUUID()}` };
+    }
+    return found;
+  }
+  async claimPaymentWebhook(tenantId: string, provider: string, eventId: string, _payload: object) {
+    const key = `${tenantId}:${provider}:${eventId}`;
+    if (this.paymentEvents.has(key)) return false;
+    this.paymentEvents.add(key);
+    return true;
+  }
+  async setPaymentStatus(currentTenant: string, orderId: string, status: "pending" | "paid" | "declined" | "refunded") {
+    const order = await this.byId(currentTenant, orderId);
+    if (!order) return false;
+    order.paymentStatus = status;
+    order.updatedAt = new Date().toISOString();
+    return true;
+  }
+  async addWhatsappLog(tenantId: string, orderId: string, recipient: string, template: string, payload: object) {
+    whatsappLogs.push({ tenantId, orderId, recipient, template, payload, at: new Date().toISOString() });
+  }
+  async listWhatsappLogs(tenantId: string) {
+    return whatsappLogs.filter((log) => log.tenantId === tenantId).map(({ at, recipient, template, orderId, payload }) => ({ at, recipient, template, orderId, payload }));
+  }
   async close() {}
 }
 
@@ -103,7 +160,7 @@ export class PostgresOrderRepository implements OrderRepository {
         }).from(productOptionGroups)
           .innerJoin(optionGroups, eq(productOptionGroups.groupId, optionGroups.id))
           .innerJoin(options, eq(options.groupId, optionGroups.id))
-          .where(eq(optionGroups.tenantId, storeRow.tenantId)),
+          .where(and(eq(optionGroups.tenantId, storeRow.tenantId), eq(productOptionGroups.tenantId, storeRow.tenantId))),
       ]);
       const settings = storeRow.settings as { pricesIncludeTax?: boolean; etaMin?: number };
       const mappedZones = zoneRows.map((zone) => ({
@@ -126,6 +183,7 @@ export class PostgresOrderRepository implements OrderRepository {
             const groupIds = [...new Set(links.map((link) => link.groupId))];
             return {
               id: product.id, categoryId: product.categoryId ?? "", name: product.name,
+              ...(product.description ? { description: product.description } : {}),
               basePriceCents: product.basePriceCents, taxRateBp: product.taxRateBp,
               status: product.status as "active" | "sold_out" | "hidden", trackStock: product.trackStock,
               ...(product.stockQty === null ? {} : { stockQty: Number(product.stockQty) }),
@@ -202,16 +260,16 @@ export class PostgresOrderRepository implements OrderRepository {
         const line = order.quote.lines.find(({ productId }) => productId === item.productId);
         if (!line) continue;
         await tx.insert(orderItems).values({
-          orderId: order.id, productId: item.productId, nameSnapshot: line.name,
+          tenantId: order.tenantId, orderId: order.id, productId: item.productId, nameSnapshot: line.name,
           unitPriceCents: line.unitPriceCents, qty: String(item.quantity),
           optionsSnapshot: line.options, lineTotalCents: line.totalCents,
         });
         const [product] = await tx.select({ trackStock: products.trackStock }).from(products).where(eq(products.id, item.productId)).limit(1);
         if (product?.trackStock) await tx.insert(stockReservations).values({
-          orderId: order.id, productId: item.productId, qty: String(item.quantity),
+          tenantId: order.tenantId, orderId: order.id, productId: item.productId, qty: String(item.quantity),
         });
       }
-      await tx.insert(orderEvents).values({ orderId: order.id, toStatus: "new", actor: "cliente" });
+      await tx.insert(orderEvents).values({ tenantId: order.tenantId, orderId: order.id, toStatus: "new", actor: "cliente" });
     });
     return { order: (await this.byId(order.tenantId, persistedId))!, replay };
   }
@@ -243,8 +301,8 @@ export class PostgresOrderRepository implements OrderRepository {
       }).from(orderRows).innerJoin(customers, eq(orderRows.customerId, customers.id))
         .where(and(eq(orderRows.tenantId, tenantId), predicate)).limit(1);
       if (!row) return undefined;
-      const items = await tx.select().from(orderItems).where(eq(orderItems.orderId, row.order.id));
-      const events = await tx.select().from(orderEvents).where(eq(orderEvents.orderId, row.order.id)).orderBy(asc(orderEvents.at));
+      const items = await tx.select().from(orderItems).where(and(eq(orderItems.tenantId, tenantId), eq(orderItems.orderId, row.order.id)));
+      const events = await tx.select().from(orderEvents).where(and(eq(orderEvents.tenantId, tenantId), eq(orderEvents.orderId, row.order.id))).orderBy(asc(orderEvents.at));
       return {
         id: row.order.id, tenantId: row.order.tenantId, token: row.order.token, number: row.order.number,
         status: row.order.status as OrderStatus, version: row.order.version,
@@ -260,7 +318,9 @@ export class PostgresOrderRepository implements OrderRepository {
           deliveryFeeCents: row.order.deliveryFeeCents, discountCents: row.order.discountCents,
           tipCents: row.order.tipCents, totalCents: row.order.totalCents, warnings: [], errors: [],
         },
-        paymentMethod: row.order.paymentMethod, ...(row.order.notes ? { notes: row.order.notes } : {}),
+        paymentMethod: row.order.paymentMethod,
+        paymentStatus: row.order.paymentStatus as DemoOrder["paymentStatus"],
+        ...(row.order.notes ? { notes: row.order.notes } : {}),
         createdAt: row.order.createdAt.toISOString(), updatedAt: row.order.updatedAt.toISOString(),
         events: events.map((event) => ({
           from: event.fromStatus as OrderStatus | null, to: event.toStatus as OrderStatus,
@@ -280,20 +340,135 @@ export class PostgresOrderRepository implements OrderRepository {
       const changed = await tx.update(orderRows).set({ status: next, version: version + 1, updatedAt: new Date() })
         .where(and(eq(orderRows.id, id), eq(orderRows.tenantId, tenantId), eq(orderRows.version, version))).returning({ id: orderRows.id });
       if (!changed.length) { conflict = true; return; }
-      await tx.insert(orderEvents).values({ orderId: id, fromStatus: current.status, toStatus: next, actor, reason });
+      await tx.insert(orderEvents).values({ tenantId, orderId: id, fromStatus: current.status, toStatus: next, actor, reason });
       if (["rejected", "canceled", "expired"].includes(next)) {
         await tx.execute(sql`
           update products p set stock_qty = p.stock_qty + r.qty, updated_at = now()
           from stock_reservations r
-          where r.order_id = ${id}::uuid and r.product_id = p.id and r.released_at is null
+          where r.tenant_id = ${tenantId}::uuid and r.order_id = ${id}::uuid
+            and r.product_id = p.id and p.tenant_id = ${tenantId}::uuid and r.released_at is null
         `);
         await tx.update(stockReservations).set({ releasedAt: new Date(), updatedAt: new Date() })
-          .where(and(eq(stockReservations.orderId, id), sql`${stockReservations.releasedAt} is null`));
+          .where(and(eq(stockReservations.tenantId, tenantId), eq(stockReservations.orderId, id), sql`${stockReservations.releasedAt} is null`));
       }
     });
     if (missing) return undefined;
     if (conflict) return "VERSION_CONFLICT";
     return this.byId(tenantId, id);
+  }
+  async adminProducts(tenantId: string) {
+    const context = await this.contextByTenant(tenantId);
+    return context?.catalog.products ?? [];
+  }
+  async createProduct(tenantId: string, input: Omit<Product, "id" | "optionGroups">) {
+    return this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const [created] = await tx.insert(products).values({
+        tenantId, categoryId: input.categoryId, name: input.name,
+        basePriceCents: input.basePriceCents, taxRateBp: input.taxRateBp,
+        trackStock: input.trackStock, stockQty: input.stockQty === undefined ? null : String(input.stockQty),
+        status: input.status,
+      }).returning();
+      if (!created) throw new Error("PRODUCT_CREATE_FAILED");
+      return { id: created.id, categoryId: created.categoryId ?? "", name: created.name, basePriceCents: created.basePriceCents,
+        taxRateBp: created.taxRateBp, status: created.status as Product["status"], trackStock: created.trackStock,
+        ...(created.stockQty === null ? {} : { stockQty: Number(created.stockQty) }), optionGroups: [] };
+    });
+  }
+  async updateProduct(tenantId: string, id: string, changes: Partial<Product>) {
+    return this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const [updated] = await tx.update(products).set({
+        ...(changes.categoryId === undefined ? {} : { categoryId: changes.categoryId }),
+        ...(changes.name === undefined ? {} : { name: changes.name }),
+        ...(changes.basePriceCents === undefined ? {} : { basePriceCents: changes.basePriceCents }),
+        ...(changes.taxRateBp === undefined ? {} : { taxRateBp: changes.taxRateBp }),
+        ...(changes.trackStock === undefined ? {} : { trackStock: changes.trackStock }),
+        ...(changes.stockQty === undefined ? {} : { stockQty: String(changes.stockQty) }),
+        ...(changes.status === undefined ? {} : { status: changes.status }),
+        updatedAt: new Date(),
+      }).where(and(eq(products.tenantId, tenantId), eq(products.id, id))).returning();
+      return updated ? { id: updated.id, categoryId: updated.categoryId ?? "", name: updated.name,
+        basePriceCents: updated.basePriceCents, taxRateBp: updated.taxRateBp,
+        status: updated.status as Product["status"], trackStock: updated.trackStock,
+        ...(updated.stockQty === null ? {} : { stockQty: Number(updated.stockQty) }), optionGroups: [] } : undefined;
+    });
+  }
+  async adminLists(tenantId: string) {
+    const context = await this.contextByTenant(tenantId);
+    return { categories: context?.catalog.categories ?? [], zones: context?.store.deliveryZones ?? [], coupons: context?.coupons ?? [] };
+  }
+  async setStoreStatus(tenantId: string, status: "open" | "paused" | "closed") {
+    await this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      await tx.update(stores).set({ status, updatedAt: new Date() }).where(eq(stores.tenantId, tenantId));
+    });
+  }
+  async exportCustomer(tenantId: string, phone: string) {
+    const match = await this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const [customer] = await tx.select({ id: customers.id, name: customers.name, phone: customers.phone }).from(customers)
+        .where(and(eq(customers.tenantId, tenantId), eq(customers.phone, phone), isNull(customers.deletedAt))).limit(1);
+      if (!customer) return undefined;
+      const rows = await tx.select({ id: orderRows.id }).from(orderRows)
+        .where(and(eq(orderRows.tenantId, tenantId), eq(orderRows.customerId, customer.id)));
+      return { customer: { name: customer.name, phone: customer.phone }, ids: rows.map(({ id }) => id) };
+    });
+    if (!match) return { customer: undefined, orders: [] as DemoOrder[] };
+    const exported = (await Promise.all(match.ids.map((id) => this.byId(tenantId, id)))).filter((order): order is DemoOrder => Boolean(order));
+    return { customer: match.customer, orders: exported };
+  }
+  async deleteCustomer(tenantId: string, phone: string) {
+    return this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const changed = await tx.update(customers).set({
+        name: "Cliente eliminado", phone: `deleted-${randomUUID()}`, deletedAt: new Date(), updatedAt: new Date(),
+      }).where(and(eq(customers.tenantId, tenantId), eq(customers.phone, phone), isNull(customers.deletedAt))).returning({ id: customers.id });
+      return changed.length > 0;
+    });
+  }
+  async claimPaymentWebhook(tenantId: string, provider: string, eventId: string, payload: object) {
+    return this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const inserted = await tx.insert(paymentWebhookEvents).values({
+        tenantId, provider, providerEventId: eventId, payload,
+      }).onConflictDoNothing().returning({ id: paymentWebhookEvents.id });
+      return inserted.length > 0;
+    });
+  }
+  async setPaymentStatus(tenantId: string, orderId: string, status: "pending" | "paid" | "declined" | "refunded") {
+    return this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const changed = await tx.update(orderRows).set({ paymentStatus: status, updatedAt: new Date() })
+        .where(and(eq(orderRows.tenantId, tenantId), eq(orderRows.id, orderId))).returning({ id: orderRows.id });
+      return changed.length > 0;
+    });
+  }
+  async addWhatsappLog(tenantId: string, orderId: string, recipient: string, template: string, payload: object) {
+    await this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      await tx.insert(whatsappLogRows).values({
+        tenantId, orderId, recipientMasked: recipient, template, payload, status: "queued",
+      });
+    });
+  }
+  async listWhatsappLogs(tenantId: string) {
+    return this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const rows = await tx.select().from(whatsappLogRows).where(eq(whatsappLogRows.tenantId, tenantId)).orderBy(asc(whatsappLogRows.createdAt));
+      return rows.map((row) => ({
+        recipient: row.recipientMasked, template: row.template, orderId: row.orderId,
+        payload: row.payload as object, at: row.createdAt.toISOString(),
+      }));
+    });
+  }
+  private async contextByTenant(tenantId: string) {
+    const slug = await this.connection.db.transaction(async (tx) => {
+      await this.setTenant(tx as never, tenantId);
+      const [tenantStore] = await tx.select({ slug: stores.slug }).from(stores).where(eq(stores.tenantId, tenantId)).limit(1);
+      return tenantStore?.slug;
+    });
+    return slug ? this.storeBySlug(slug) : undefined;
   }
   async close() { await this.connection.close(); }
 }

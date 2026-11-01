@@ -14,7 +14,7 @@ export default function IngresarPage() {
     try {
       const session = await api<{ accessToken: string }>("/v1/auth/login", {
         method: "POST",
-        body: JSON.stringify({ email: form.get("email"), password: form.get("password") }),
+        body: JSON.stringify({ tenantSlug: form.get("tenantSlug"), email: form.get("email"), password: form.get("password") }),
       });
       localStorage.setItem("pedidos-access-token", session.accessToken);
       router.replace("/pedidos");
@@ -27,6 +27,7 @@ export default function IngresarPage() {
     <form className="card form" onSubmit={submit}>
       <div><div className="eyebrow">Panel del comercio</div><h1>Inicia sesión</h1></div>
       {error && <div className="banner" role="alert">{error}</div>}
+      <div className="field"><label htmlFor="tenantSlug">Comercio</label><input id="tenantSlug" name="tenantSlug" defaultValue="arepa-express" autoComplete="organization" required /></div>
       <div className="field"><label htmlFor="email">Correo</label><input id="email" name="email" type="email" autoComplete="username" required /></div>
       <div className="field"><label htmlFor="password">Contraseña</label><input id="password" name="password" type="password" autoComplete="current-password" required /></div>
       <button className="btn big-btn" disabled={busy}>{busy ? "Ingresando…" : "Ingresar"}</button>

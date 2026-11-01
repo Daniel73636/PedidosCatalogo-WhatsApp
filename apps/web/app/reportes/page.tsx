@@ -1,1 +1,6 @@
-import {PanelPlaceholder} from "@/components/panel-placeholder";export default function Page(){return <PanelPlaceholder type="reportes"/>}
+import { PanelShell } from "@/components/panel-shell";
+import { ReportsDashboard } from "@/components/reports-dashboard";
+
+export default function ReportsPage() {
+  return <PanelShell><ReportsDashboard /></PanelShell>;
+}

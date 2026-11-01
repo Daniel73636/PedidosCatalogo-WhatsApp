@@ -23,6 +23,7 @@ export interface Product {
   id: string;
   categoryId: string;
   name: string;
+  description?: string;
   basePriceCents: Money;
   taxRateBp: number;
   status: "active" | "sold_out" | "hidden";
