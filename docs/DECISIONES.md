@@ -23,3 +23,7 @@
 ## 2026-11-01 — Riesgo transaccional
 
 **Decisión:** la reserva en memoria se prueba contra concurrencia dentro de un proceso, pero no se presenta como garantía productiva. PostgreSQL con transacción y bloqueo condicional es P0 pendiente.
+
+## 2026-11-01 — Repositorio PostgreSQL y RLS
+
+**Decisión:** `DATABASE_URL` selecciona PostgreSQL por defecto; memoria queda para demo/pruebas. Pedido, idempotencia, numeración y reserva de stock comparten transacción. Un advisory lock por tenant serializa numeración/idempotencia y el `UPDATE ... WHERE stock_qty >= cantidad` evita sobreventa. RLS usa contexto local a la transacción; el rol de aplicación no debe tener `BYPASSRLS`.
