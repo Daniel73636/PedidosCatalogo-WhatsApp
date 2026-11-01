@@ -7,9 +7,10 @@ import { createOrderSchema, productInputSchema, quoteRequestSchema, transitionRe
 import { quote, transition, type Cart, type OrderStatus } from "@pedidos/domain-pricing";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { login, principalFromApiKey, refresh, seedDemoUser, verifyToken, type Principal } from "./auth.js";
-import { catalog, coupons, idempotency, orders, store, tenantId, whatsappLogs, zone, type DemoOrder } from "./data.js";
+import { catalog, coupons, orders, store, tenantId, whatsappLogs, type DemoOrder } from "./data.js";
 import { loadEnv } from "./env.js";
 import { MockPaymentProvider, WompiPaymentProvider } from "./payments.js";
+import { MemoryOrderRepository, PostgresOrderRepository } from "./repository.js";
 
 const env = loadEnv();
 const app = Fastify({ logger: env.NODE_ENV !== "test", bodyLimit: 2_000_000, trustProxy: true });
@@ -24,6 +25,9 @@ await app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
 await seedDemoUser();
 const principals = new WeakMap<FastifyRequest, Principal>();
 const paymentProvider = env.PAYMENTS_PROVIDER === "wompi" ? new WompiPaymentProvider() : new MockPaymentProvider();
+const orderRepository = env.DATABASE_URL && !env.DEMO_MODE
+  ? new PostgresOrderRepository(env.DATABASE_URL)
+  : new MemoryOrderRepository();
 
 const subscribers = new Set<FastifyReply>();
 const broadcast = (event: string, data: unknown) => {
@@ -72,7 +76,7 @@ const privateGuard = async (request: FastifyRequest, reply: FastifyReply) => {
     return problem(reply, 401, "TOKEN_INVALIDO", "La sesión venció o no es válida.");
   }
 };
-const couponFor = (code?: string) => coupons.find((coupon) => coupon.code === code?.toUpperCase());
+const couponFor = (availableCoupons: typeof coupons, code?: string) => availableCoupons.find((coupon) => coupon.code === code?.toUpperCase());
 const maskPhone = (phone: string) => `${phone.slice(0, 3)}***${phone.slice(-2)}`;
 const sendWhatsappMock = (order: DemoOrder, template: string) => {
   const log = {
@@ -87,7 +91,10 @@ const sendWhatsappMock = (order: DemoOrder, template: string) => {
 };
 
 app.get("/health", async () => ({ ok: true, service: "pedidos-api" }));
-app.get("/ready", async () => ({ ready: true, dependencies: { memoryRepository: "ok" } }));
+app.get("/ready", async (_request, reply) => {
+  const ready = await orderRepository.ready();
+  return reply.status(ready ? 200 : 503).send({ ready, dependencies: { orderRepository: orderRepository.kind } });
+});
 app.post("/v1/auth/login", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request, reply) => {
   const { email, password } = request.body as { email?: string; password?: string };
   if (!email || !password) return problem(reply, 400, "CREDENCIALES_REQUERIDAS", "Correo y contraseña son obligatorios.");
@@ -112,32 +119,35 @@ app.post("/v1/auth/refresh", async (request, reply) => {
   }
 });
 app.get("/v1/public/:slug/menu", async (request, reply) => {
-  if ((request.params as { slug: string }).slug !== store.slug) return problem(reply, 404, "STORE_NOT_FOUND", "Tienda no encontrada.");
-  return { store, catalog, generatedAt: new Date().toISOString() };
+  const context = await orderRepository.storeBySlug((request.params as { slug: string }).slug);
+  if (!context) return problem(reply, 404, "STORE_NOT_FOUND", "Tienda no encontrada.");
+  return { store: context.store, catalog: context.catalog, generatedAt: new Date().toISOString() };
 });
 app.post("/v1/public/:slug/coverage", async (request, reply) => {
+  const context = await orderRepository.storeBySlug((request.params as { slug: string }).slug);
+  if (!context) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
   const body = request.body as { lat?: number; lng?: number };
   if (typeof body.lat !== "number" || typeof body.lng !== "number")
     return problem(reply, 400, "VALIDATION_ERROR", "Ubicación inválida.");
-  const covered = body.lat <= zone.bounds.north && body.lat >= zone.bounds.south && body.lng <= zone.bounds.east && body.lng >= zone.bounds.west;
-  return covered ? { covered, zoneId: zone.id, feeCents: zone.feeCents, etaMin: store.etaMin } : { covered: false };
+  const coveredZone = context.store.deliveryZones.find(({ bounds }) =>
+    body.lat! <= bounds.north && body.lat! >= bounds.south && body.lng! <= bounds.east && body.lng! >= bounds.west);
+  return coveredZone ? { covered: true, zoneId: coveredZone.id, feeCents: coveredZone.feeCents, etaMin: context.store.etaMin } : { covered: false };
 });
 app.post("/v1/public/:slug/quote", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (request, reply) => {
-  if ((request.params as { slug: string }).slug !== store.slug) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
+  const context = await orderRepository.storeBySlug((request.params as { slug: string }).slug);
+  if (!context) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
   const input = parse(quoteRequestSchema.safeParse(request.body), reply);
   if (!input) return;
-  return quote(input.cart, catalog, store, input.address, couponFor(input.couponCode), new Date());
+  return quote(input.cart, context.catalog, context.store, input.address, couponFor(context.coupons, input.couponCode), new Date());
 });
 app.post("/v1/public/:slug/orders", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request, reply) => {
-  if ((request.params as { slug: string }).slug !== store.slug) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
+  const context = await orderRepository.storeBySlug((request.params as { slug: string }).slug);
+  if (!context) return problem(reply, 404, "TIENDA_NO_ENCONTRADA", "Tienda no encontrada.");
   const key = request.headers["idempotency-key"];
   if (!key || Array.isArray(key)) return problem(reply, 400, "IDEMPOTENCY_KEY_REQUIRED", "Envía Idempotency-Key.");
-  const tenantKey = `${tenantId}:${key}`;
-  const previous = idempotency.get(tenantKey);
-  if (previous) return reply.status(200).send(orders.get(previous));
   const input = parse(createOrderSchema.safeParse(request.body), reply);
   if (!input) return;
-  const calculated = quote(input.cart, catalog, store, input.address, couponFor(input.couponCode), new Date());
+  const calculated = quote(input.cart, context.catalog, context.store, input.address, couponFor(context.coupons, input.couponCode), new Date());
   if (calculated.errors.length) {
     const outOfStock = calculated.errors.some((error) => error.startsWith("OUT_OF_STOCK"));
     return problem(reply, outOfStock ? 409 : 422, outOfStock ? "OUT_OF_STOCK" : "QUOTE_INVALID", "El carrito no se puede procesar.", { quote: calculated });
@@ -145,24 +155,11 @@ app.post("/v1/public/:slug/orders", { config: { rateLimit: { max: 10, timeWindow
   if (calculated.totalCents !== input.expectedTotalCents)
     return problem(reply, 409, "PRICE_CHANGED", "El total del carrito cambió.", { quote: calculated });
 
-  // Reserva atómica en este proceso: validar todo antes de mutar cualquier unidad.
-  const requested = new Map<string, number>();
-  for (const item of input.cart.items) requested.set(item.productId, (requested.get(item.productId) ?? 0) + item.quantity);
-  for (const [id, qty] of requested) {
-    const product = catalog.products.find((entry) => entry.id === id);
-    if (product?.trackStock && (product.stockQty ?? 0) < qty)
-      return problem(reply, 409, "OUT_OF_STOCK", `${product.name} ya no tiene unidades suficientes.`);
-  }
-  for (const [id, qty] of requested) {
-    const product = catalog.products.find((entry) => entry.id === id);
-    if (product?.trackStock) product.stockQty = (product.stockQty ?? 0) - qty;
-  }
-
   const now = new Date().toISOString();
   const id = randomUUID();
   const order: DemoOrder = {
     id,
-    tenantId,
+    tenantId: context.tenantId,
     token: randomBytes(24).toString("base64url"),
     number: orders.size + 1,
     status: "new",
@@ -176,27 +173,34 @@ app.post("/v1/public/:slug/orders", { config: { rateLimit: { max: 10, timeWindow
     updatedAt: now,
     events: [{ from: null, to: "new", actor: "cliente", at: now }],
   };
-  orders.set(id, order);
-  idempotency.set(tenantKey, id);
-  sendWhatsappMock(order, "order_received");
-  broadcast("order.new", order);
-  return reply.status(201).send(order);
+  try {
+    const persisted = await orderRepository.create(order, key);
+    if (!persisted.replay) {
+      sendWhatsappMock(persisted.order, "order_received");
+      broadcast("order.new", persisted.order);
+    }
+    return reply.status(persisted.replay ? 200 : 201).send(persisted.order);
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.startsWith("OUT_OF_STOCK"))
+      return problem(reply, 409, "OUT_OF_STOCK", "Ya no hay unidades suficientes para completar el pedido.");
+    throw cause;
+  }
 });
 app.get("/v1/public/orders/:token", async (request, reply) => {
-  const order = [...orders.values()].find(({ token }) => token === (request.params as { token: string }).token);
+  const order = await orderRepository.byToken((request.params as { token: string }).token);
   if (!order) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
   return order;
 });
 app.get("/v1/public/orders/:token/events", async (request, reply) => {
   const token = (request.params as { token: string }).token;
-  if (![...orders.values()].some((order) => order.token === token)) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  if (!(await orderRepository.byToken(token))) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
   reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   const timer = setInterval(() => reply.raw.write(`event: ping\ndata: {}\n\n`), 20_000);
   subscribers.add(reply);
   request.raw.on("close", () => { clearInterval(timer); subscribers.delete(reply); });
 });
 app.post("/v1/public/orders/:token/proof", async (request, reply) => {
-  const order = [...orders.values()].find(({ token }) => token === (request.params as { token: string }).token);
+  const order = await orderRepository.byToken((request.params as { token: string }).token);
   if (!order) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
   broadcast("order.payment_proof", { orderId: order.id, received: true });
   return reply.status(202).send({ ok: true, status: "payment_review", mock: true });
@@ -212,36 +216,28 @@ app.get("/v1/events", { preHandler: privateGuard }, async (request, reply) => {
 app.get("/v1/orders", { preHandler: privateGuard }, async (request) => {
   const status = (request.query as { status?: OrderStatus }).status;
   const principal = principals.get(request)!;
-  return [...orders.values()].filter((order) => order.tenantId === principal.tenantId && (!status || order.status === status));
+  return orderRepository.list(principal.tenantId, status);
 });
 app.patch("/v1/orders/:id/transition", { preHandler: privateGuard }, async (request, reply) => {
-  const order = orders.get((request.params as { id: string }).id);
-  if (!order || order.tenantId !== principals.get(request)!.tenantId) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  const principal = principals.get(request)!;
+  const order = await orderRepository.byId(principal.tenantId, (request.params as { id: string }).id);
+  if (!order) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
   const input = parse(transitionRequestSchema.safeParse(request.body), reply);
   if (!input) return;
-  if (input.version !== order.version) return problem(reply, 412, "VERSION_CONFLICT", "El pedido cambió en otro dispositivo.", { order });
   let next: OrderStatus;
   try { next = transition(order.status, input.event); }
   catch { return problem(reply, 409, "INVALID_TRANSITION", `No se puede aplicar ${input.event} desde ${order.status}.`); }
-  const previous = order.status;
-  order.status = next;
-  order.version += 1;
-  order.updatedAt = new Date().toISOString();
-  order.events.push({ from: previous, to: next, actor: input.actor, at: order.updatedAt, ...(input.reason ? { reason: input.reason } : {}) });
-  if (["rejected", "canceled", "expired"].includes(next)) {
-    for (const item of order.cart.items) {
-      const product = catalog.products.find(({ id }) => id === item.productId);
-      if (product?.trackStock) product.stockQty = (product.stockQty ?? 0) + item.quantity;
-    }
-  }
-  sendWhatsappMock(order, `order_${next}`);
-  broadcast("order.updated", order);
-  return order;
+  const changed = await orderRepository.transition(principal.tenantId, order.id, input.version, next, input.actor, input.reason);
+  if (changed === "VERSION_CONFLICT") return problem(reply, 412, "VERSION_CONFLICT", "El pedido cambió en otro dispositivo.", { order });
+  if (!changed) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  sendWhatsappMock(changed, `order_${next}`);
+  broadcast("order.updated", changed);
+  return changed;
 });
 app.post("/v1/orders/:id/assign-courier", { preHandler: privateGuard }, async (request) => ({ ok: true, orderId: (request.params as { id: string }).id, courier: request.body }));
 app.post("/v1/orders/:id/payment/validate", { preHandler: privateGuard }, async (request, reply) => {
-  const order = orders.get((request.params as { id: string }).id);
-  if (!order || order.tenantId !== principals.get(request)!.tenantId) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
+  const order = await orderRepository.byId(principals.get(request)!.tenantId, (request.params as { id: string }).id);
+  if (!order) return problem(reply, 404, "ORDER_NOT_FOUND", "Pedido no encontrado.");
   const payment = await paymentProvider.createPayment({
     tenantId: order.tenantId, orderId: order.id, amountCents: order.quote.totalCents, currency: "COP",
     idempotencyKey: `payment:${order.id}`,
@@ -283,7 +279,7 @@ app.get("/v1/coupons", { preHandler: privateGuard }, async () => coupons);
 app.post("/v1/menu-import", { preHandler: privateGuard }, async () => ({ id: randomUUID(), status: "needs_review", mock: true }));
 app.get("/v1/menu-import/:id", { preHandler: privateGuard }, async (request) => ({ id: (request.params as { id: string }).id, status: "needs_review", suggestions: [] }));
 app.get("/v1/reports/summary", { preHandler: privateGuard }, async () => {
-  const all = [...orders.values()];
+  const all = await orderRepository.list(tenantId);
   return { orders: all.length, salesCents: all.filter(({ status }) => status === "delivered").reduce((sum, order) => sum + order.quote.totalCents, 0), topProducts: [] };
 });
 app.patch("/v1/store/status", { preHandler: privateGuard }, async (request) => {
@@ -314,4 +310,5 @@ app.delete("/v1/customers/:phone", { preHandler: privateGuard }, async (request,
 });
 
 export { app };
+app.addHook("onClose", async () => orderRepository.close());
 if (env.NODE_ENV !== "test") await app.listen({ port: env.API_PORT, host: "0.0.0.0" });

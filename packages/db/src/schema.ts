@@ -132,6 +132,7 @@ export const customers = pgTable(
 export const orders = pgTable("orders", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
   number: integer("number").notNull(),
   customerId: uuid("customer_id").notNull().references(() => customers.id),
   token: text("token").notNull().unique(),
@@ -150,7 +151,10 @@ export const orders = pgTable("orders", {
   notes: text("notes"),
   version: integer("version").notNull().default(1),
   ...audit,
-});
+}, (table) => [
+  uniqueIndex("orders_tenant_idempotency_idx").on(table.tenantId, table.idempotencyKey),
+  uniqueIndex("orders_tenant_number_idx").on(table.tenantId, table.number),
+]);
 export const orderItems = pgTable("order_items", {
   id: uuid("id").primaryKey().defaultRandom(),
   orderId: uuid("order_id").notNull().references(() => orders.id),
